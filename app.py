@@ -100,6 +100,63 @@ def safe_filename(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]+", "_", str(name))[:80]
 
 
+def has_variance(series: pd.Series) -> bool:
+    """Return True only when a variable has at least two distinct non-missing values."""
+    return series.dropna().astype(str).nunique() > 1
+
+
+def is_year_column(df: pd.DataFrame, col: str) -> bool:
+    """Detect year-like variables so they are treated as time/categorical, not quantitative."""
+    name = str(col).lower().strip()
+    if "year" in name or name in ["yr", "years", "year_enrolled", "enrollment_year"]:
+        return True
+
+    values = pd.to_numeric(df[col], errors="coerce").dropna()
+    if values.empty:
+        return False
+
+    # Treat mostly four-digit integer values in a reasonable year range as year/time variables.
+    in_year_range = values.between(1900, 2100).mean() >= 0.90
+    mostly_integer = (values % 1 == 0).mean() >= 0.90
+    reasonable_unique = values.nunique() <= 80
+    return bool(in_year_range and mostly_integer and reasonable_unique)
+
+
+def get_no_variance_columns(df: pd.DataFrame, cols):
+    """Identify variables that should not produce visuals because all values are the same."""
+    results = []
+    for col in cols:
+        if col not in df.columns:
+            continue
+        non_missing = df[col].dropna()
+        unique_count = non_missing.astype(str).nunique()
+        if unique_count <= 1:
+            single_value = "Missing only" if non_missing.empty else str(non_missing.iloc[0])
+            results.append({
+                "Variable": col,
+                "Reason skipped": "No variance / all non-missing values are the same",
+                "Single value detected": single_value,
+                "Non-missing responses": int(len(non_missing)),
+            })
+    return pd.DataFrame(results)
+
+
+def add_bar_labels(ax, fmt="{:.0f}"):
+    """Add values on bar charts for easier interpretation."""
+    for patch in ax.patches:
+        width = patch.get_width()
+        height = patch.get_height()
+        if pd.isna(width) or width == 0:
+            continue
+        ax.text(
+            width,
+            patch.get_y() + height / 2,
+            " " + fmt.format(width),
+            va="center",
+            fontsize=7,
+        )
+
+
 def add_docx_table(doc, df: pd.DataFrame):
     """Add a pandas DataFrame to a Word document."""
     if df is None or df.empty:
@@ -120,8 +177,14 @@ def add_docx_table(doc, df: pd.DataFrame):
 
 
 def detect_numeric_variables(df):
-    """Detect quantitative variables."""
-    return df.select_dtypes(include="number").columns.tolist()
+    """Detect quantitative variables, excluding year/time-like columns."""
+    numeric = df.select_dtypes(include="number").columns.tolist()
+    return [col for col in numeric if not is_year_column(df, col)]
+
+
+def detect_year_columns(df):
+    """Return columns that appear to represent years/time periods."""
+    return [col for col in df.columns if is_year_column(df, col)]
 
 
 def detect_likert_variables(df):
@@ -156,7 +219,7 @@ def detect_yes_no_variables(df):
 def detect_categorical_variables(df, numeric_cols=None, max_unique=30):
     """
     Detect categorical variables for frequency distribution.
-    Numeric columns with very few unique values are also allowed as categorical.
+    Year/time-like columns are treated as categorical/time variables, not quantitative variables.
     """
     numeric_cols = numeric_cols or []
     categorical_cols = []
@@ -167,7 +230,9 @@ def detect_categorical_variables(df, numeric_cols=None, max_unique=30):
         if unique_count == 0:
             continue
 
-        if col not in numeric_cols:
+        if is_year_column(df, col):
+            categorical_cols.append(col)
+        elif col not in numeric_cols:
             if unique_count <= max_unique:
                 categorical_cols.append(col)
         else:
@@ -734,8 +799,10 @@ def save_likert_bar_chart(summary_df, outpath):
     plot_df = summary_df.sort_values("Percentage Agree or Above", ascending=True).tail(15)
 
     ax.barh(plot_df["Variable"], plot_df["Percentage Agree or Above"])
+    add_bar_labels(ax, fmt="{:.1f}%")
     ax.set_xlabel("Percentage Agree or Strongly Agree")
     ax.set_title("Top Likert-Scale Barriers")
+    ax.set_xlim(0, max(100, plot_df["Percentage Agree or Above"].max() * 1.18))
     fig.tight_layout()
     fig.savefig(outpath, dpi=300)
     plt.close(fig)
@@ -767,6 +834,7 @@ def save_grouped_likert_chart(summary_df, outpath, title="Gender-Disaggregated L
     ).fillna(0)
 
     pivot.plot(kind="barh", ax=ax)
+    add_bar_labels(ax, fmt="{:.1f}%")
     ax.set_xlabel("Percentage Agree or Strongly Agree")
     ax.set_title(title)
     ax.legend(title="Group", loc="best")
@@ -781,11 +849,21 @@ def save_numeric_histograms(df, numeric_cols, output_dir):
     for col in numeric_cols[:12]:
         series = pd.to_numeric(df[col], errors="coerce").dropna()
 
-        if series.empty:
+        if series.empty or not has_variance(series):
             continue
 
         fig, ax = plt.subplots(figsize=(4.5, 3.2))
-        ax.hist(series, bins=15)
+        counts, bins, patches = ax.hist(series, bins=15)
+        for count, patch in zip(counts, patches):
+            if count > 0:
+                ax.text(
+                    patch.get_x() + patch.get_width() / 2,
+                    count,
+                    str(int(count)),
+                    ha="center",
+                    va="bottom",
+                    fontsize=7,
+                )
         ax.set_title(f"{col}", fontsize=9)
         ax.set_xlabel(col, fontsize=8)
         ax.set_ylabel("Frequency", fontsize=8)
@@ -803,16 +881,24 @@ def save_numeric_histograms(df, numeric_cols, output_dir):
 def save_yes_no_pie_charts(df, yes_no_cols, output_dir):
     saved_paths = []
 
+    def autopct_with_counts(values):
+        total = sum(values)
+        def _inner(pct):
+            count = int(round(pct * total / 100.0))
+            return f"{pct:.1f}%\n(n={count})"
+        return _inner
+
     for col in yes_no_cols[:8]:
         series = df[col].dropna().astype(str).str.lower().str.strip()
-        yes_count = series.isin(["yes", "1", "true"]).sum()
-        no_count = series.isin(["no", "0", "false"]).sum()
+        yes_count = int(series.isin(["yes", "1", "true"]).sum())
+        no_count = int(series.isin(["no", "0", "false"]).sum())
+        values = [yes_count, no_count]
 
-        if yes_count + no_count == 0:
+        if sum(values) == 0 or len([v for v in values if v > 0]) <= 1:
             continue
 
         fig, ax = plt.subplots(figsize=(4.2, 3.2))
-        ax.pie([yes_count, no_count], labels=["Yes", "No"], autopct="%1.1f%%", textprops={"fontsize": 8})
+        ax.pie(values, labels=["Yes", "No"], autopct=autopct_with_counts(values), textprops={"fontsize": 8})
         ax.set_title(f"{col}", fontsize=9)
 
         outpath = output_dir / f"pie_{safe_filename(col)}.png"
@@ -829,14 +915,17 @@ def save_categorical_bar_charts(df, categorical_cols, output_dir):
     for col in categorical_cols[:12]:
         counts = df[col].fillna("Missing").astype(str).value_counts().head(10)
 
-        if counts.empty:
+        if counts.empty or counts.nunique() <= 1 and len(counts) <= 1:
             continue
 
         fig, ax = plt.subplots(figsize=(4.8, 3.2))
-        counts.sort_values().plot(kind="barh", ax=ax)
+        counts_sorted = counts.sort_values()
+        counts_sorted.plot(kind="barh", ax=ax)
+        add_bar_labels(ax, fmt="{:.0f}")
         ax.set_title(f"{col}", fontsize=9)
         ax.set_xlabel("Frequency", fontsize=8)
         ax.tick_params(axis="both", labelsize=7)
+        ax.set_xlim(0, max(1, counts_sorted.max() * 1.18))
         fig.tight_layout()
 
         outpath = output_dir / f"categorical_{safe_filename(col)}.png"
@@ -1113,9 +1202,13 @@ df = coerce_analysis_columns(df)
 mapping = variable_mapping(df)
 
 numeric_cols = detect_numeric_variables(df)
+year_cols = detect_year_columns(df)
 likert_cols = detect_likert_variables(df)
 yes_no_cols = detect_yes_no_variables(df)
 categorical_cols = detect_categorical_variables(df, numeric_cols=numeric_cols)
+
+# Variables with no variance are still shown in tables, but visuals are skipped to avoid unhelpful 100% charts.
+skipped_visuals = get_no_variance_columns(df, list(dict.fromkeys(numeric_cols + categorical_cols + yes_no_cols + likert_cols)))
 
 gender_col = find_gender_column(df)
 df_gender, gender_group_col = standardize_gender_for_men_women(df, gender_col)
@@ -1200,6 +1293,8 @@ all_tables = {
     "likert_agree_summary": likert_summary,
     "likert_full_distribution": likert_distribution,
     "yes_no_summary": yes_no_results,
+    "year_time_columns": pd.DataFrame({"Year / time-like columns treated as categorical": year_cols}),
+    "visuals_skipped_no_variance": skipped_visuals,
     "gender_quantitative": gender_quant,
     "gender_quantitative_comparison": gender_quant_comparison,
     "gender_likert": gender_likert,
@@ -1272,6 +1367,11 @@ metric_cols[0].metric("Records", f"{df.shape[0]:,}")
 metric_cols[1].metric("Variables", f"{df.shape[1]:,}")
 metric_cols[2].metric("Quantitative variables", f"{len(numeric_cols):,}")
 metric_cols[3].metric("Categorical variables", f"{len(categorical_cols):,}")
+
+if year_cols:
+    st.info("Year/time-like columns were treated as categorical/time variables, not quantitative variables: " + ", ".join(map(str, year_cols)))
+if not skipped_visuals.empty:
+    st.warning(f"{len(skipped_visuals)} variable(s) had no variance and were skipped from visuals to avoid unhelpful 100% charts. See the Visual Dashboard note for details.")
 
 st.markdown('<div class="section-card">', unsafe_allow_html=True)
 st.markdown("#### Automated Summary Insights")
@@ -1393,7 +1493,14 @@ with tabs[0]:
 
 with tabs[1]:
     st.subheader("Reader-Friendly Visual Dashboard")
-    st.caption("Figures are intentionally compact and displayed four per row for easier scanning.")
+    st.caption("Figures are intentionally compact and displayed four per row for easier scanning. Values are displayed directly on charts where possible.")
+
+    if not skipped_visuals.empty:
+        st.info("The following variables were skipped from visuals because they have no variance/all values are the same. They remain available in the data tables and downloadable outputs.")
+        st.dataframe(skipped_visuals, use_container_width=True)
+
+    if year_cols:
+        st.info("Year/time-like columns are treated as categorical/time variables and are not included in quantitative histograms: " + ", ".join(map(str, year_cols)))
 
     st.markdown("#### Key Summary Visuals")
     main_visuals = [p for p in [fig_likert, fig_gender_likert, fig_corr, fig_paths] if p.exists()]
