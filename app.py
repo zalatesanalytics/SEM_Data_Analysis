@@ -1,4 +1,6 @@
+
 from pathlib import Path
+import re
 import matplotlib.pyplot as plt
 import networkx as nx
 import pandas as pd
@@ -18,7 +20,7 @@ st.set_page_config(page_title="EMERGE+ SEM Analyzer", layout="wide")
 st.title("EMERGE+ Newcomer SEM Analyzer")
 st.caption(
     "Upload a CSV or Excel file, clean variables, estimate SEM pathways, "
-    "visualize results, and generate a Word report."
+    "visualize results, generate descriptive analysis, and produce a Word report."
 )
 
 OUTPUT_ROOT = Path("outputs")
@@ -26,7 +28,21 @@ for sub in ["tables", "figures", "processed_data", "model_outputs"]:
     (OUTPUT_ROOT / sub).mkdir(parents=True, exist_ok=True)
 
 
+# -------------------------------------------------------------------
+# General helper functions
+# -------------------------------------------------------------------
+
+def safe_filename(name: str) -> str:
+    """Convert any variable name into a safe file name."""
+    return re.sub(r"[^A-Za-z0-9_]+", "_", str(name))[:80]
+
+
 def add_docx_table(doc, df: pd.DataFrame):
+    """Add a pandas DataFrame to a Word document."""
+    if df is None or df.empty:
+        doc.add_paragraph("No data available.")
+        return
+
     display = df.copy().fillna("")
     table = doc.add_table(rows=1, cols=len(display.columns))
     table.style = "Table Grid"
@@ -41,29 +57,169 @@ def add_docx_table(doc, df: pd.DataFrame):
 
 
 def detect_numeric_variables(df):
+    """Detect quantitative variables."""
     return df.select_dtypes(include="number").columns.tolist()
 
 
 def detect_likert_variables(df):
+    """
+    Detect Likert-scale variables coded 1 to 5.
+    These are used to calculate percentage agreeing or strongly agreeing.
+    """
     likert_cols = []
     for col in df.columns:
         values = df[col].dropna().unique()
         numeric_values = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
         if len(numeric_values) > 0 and numeric_values.between(1, 5).all():
-            likert_cols.append(col)
+            unique_count = numeric_values.nunique()
+            if 2 <= unique_count <= 5:
+                likert_cols.append(col)
     return likert_cols
 
 
 def detect_yes_no_variables(df):
+    """Detect Yes/No variables."""
     yes_no_cols = []
+    yes_no_values = {"yes", "no", "1", "0", "true", "false"}
+
     for col in df.columns:
         values = df[col].dropna().astype(str).str.lower().str.strip().unique()
-        if len(values) > 0 and set(values).issubset({"yes", "no", "1", "0", "true", "false"}):
+        if len(values) > 0 and set(values).issubset(yes_no_values):
             yes_no_cols.append(col)
+
     return yes_no_cols
 
 
+def detect_categorical_variables(df, numeric_cols=None, max_unique=30):
+    """
+    Detect categorical variables for frequency distribution.
+    Numeric columns with very few unique values are also allowed as categorical.
+    """
+    numeric_cols = numeric_cols or []
+    categorical_cols = []
+
+    for col in df.columns:
+        unique_count = df[col].nunique(dropna=True)
+
+        if unique_count == 0:
+            continue
+
+        if col not in numeric_cols:
+            if unique_count <= max_unique:
+                categorical_cols.append(col)
+        else:
+            if unique_count <= 10:
+                categorical_cols.append(col)
+
+    return categorical_cols
+
+
+def find_gender_column(df):
+    """
+    Find the most likely gender column.
+    Priority is given to columns named gender, sex, respondent_gender, or participant_gender.
+    """
+    candidate_names = [
+        "gender", "sex", "respondent_gender", "participant_gender",
+        "gender_identity", "respondent_sex"
+    ]
+
+    lower_map = {col.lower().strip(): col for col in df.columns}
+
+    for name in candidate_names:
+        if name in lower_map:
+            return lower_map[name]
+
+    for col in df.columns:
+        if "gender" in col.lower() or col.lower().strip() == "sex":
+            return col
+
+    return None
+
+
+def standardize_gender_for_men_women(df, gender_col):
+    """
+    Keep gender disaggregation only for Men and Women.
+    Any third option or other response is excluded from gender-disaggregated analysis.
+    """
+    if gender_col is None or gender_col not in df.columns:
+        return df.copy(), None
+
+    df_gender = df.copy()
+
+    def recode_gender(value):
+        if pd.isna(value):
+            return None
+
+        text = str(value).strip().lower()
+
+        if text in ["male", "man", "men", "m", "1"]:
+            return "Men"
+        if text in ["female", "woman", "women", "f", "2"]:
+            return "Women"
+
+        return None
+
+    df_gender["gender_group"] = df_gender[gender_col].apply(recode_gender)
+    df_gender = df_gender[df_gender["gender_group"].isin(["Men", "Women"])].copy()
+
+    return df_gender, "gender_group"
+
+
+# -------------------------------------------------------------------
+# Descriptive analysis functions
+# -------------------------------------------------------------------
+
+def quantitative_summary(df, numeric_cols):
+    """Produce average and descriptive statistics for all quantitative variables."""
+    if not numeric_cols:
+        return pd.DataFrame()
+
+    summary = df[numeric_cols].describe().T.reset_index().rename(columns={
+        "index": "Variable",
+        "count": "Valid responses",
+        "mean": "Mean / Average",
+        "std": "Standard deviation",
+        "min": "Minimum",
+        "25%": "25th percentile",
+        "50%": "Median",
+        "75%": "75th percentile",
+        "max": "Maximum"
+    })
+
+    numeric_summary_cols = [
+        "Mean / Average", "Standard deviation", "Minimum",
+        "25th percentile", "Median", "75th percentile", "Maximum"
+    ]
+
+    for col in numeric_summary_cols:
+        if col in summary.columns:
+            summary[col] = summary[col].round(2)
+
+    return summary
+
+
+def categorical_frequency_summary(df, categorical_cols):
+    """Create frequency and percentage distribution for categorical variables."""
+    all_results = []
+
+    for col in categorical_cols:
+        counts = df[col].fillna("Missing").astype(str).value_counts(dropna=False)
+        total = counts.sum()
+
+        for category, count in counts.items():
+            all_results.append({
+                "Variable": col,
+                "Category": category,
+                "Frequency": int(count),
+                "Percentage": round((count / total) * 100, 2) if total > 0 else 0
+            })
+
+    return pd.DataFrame(all_results)
+
+
 def likert_agree_summary(df, likert_cols):
+    """Calculate percentage Agree or Strongly Agree for Likert variables coded 1-5."""
     results = []
 
     for col in likert_cols:
@@ -74,6 +230,7 @@ def likert_agree_summary(df, likert_cols):
             continue
 
         agree_count = series[series >= 4].count()
+
         results.append({
             "Variable": col,
             "Valid responses": total,
@@ -85,6 +242,7 @@ def likert_agree_summary(df, likert_cols):
 
 
 def yes_no_summary(df, yes_no_cols):
+    """Calculate percentage Yes for Yes/No variables."""
     results = []
 
     for col in yes_no_cols:
@@ -95,43 +253,179 @@ def yes_no_summary(df, yes_no_cols):
             continue
 
         yes_count = series.isin(["yes", "1", "true"]).sum()
+
         results.append({
             "Variable": col,
             "Valid responses": total,
-            "Yes responses": yes_count,
+            "Yes responses": int(yes_count),
             "Percentage Yes": round((yes_count / total) * 100, 2)
         })
 
     return pd.DataFrame(results)
 
 
-def quantitative_summary(df, numeric_cols):
-    if not numeric_cols:
+def quantitative_summary_by_group(df, numeric_cols, group_col):
+    """Mean/average quantitative analysis by gender or selected categorical group."""
+    if group_col is None or group_col not in df.columns or not numeric_cols:
         return pd.DataFrame()
 
-    return df[numeric_cols].describe().T.reset_index().rename(columns={
-        "index": "Variable",
-        "count": "Valid responses",
-        "mean": "Mean",
-        "std": "Standard deviation",
-        "min": "Minimum",
-        "25%": "25th percentile",
-        "50%": "Median",
-        "75%": "75th percentile",
-        "max": "Maximum"
-    })
+    results = []
 
+    for group, gdf in df.groupby(group_col):
+        for col in numeric_cols:
+            series = pd.to_numeric(gdf[col], errors="coerce").dropna()
+            if series.empty:
+                continue
+
+            results.append({
+                "Group variable": group_col,
+                "Group": group,
+                "Variable": col,
+                "Valid responses": len(series),
+                "Mean / Average": round(series.mean(), 2),
+                "Median": round(series.median(), 2),
+                "Minimum": round(series.min(), 2),
+                "Maximum": round(series.max(), 2),
+                "Standard deviation": round(series.std(), 2) if len(series) > 1 else 0
+            })
+
+    return pd.DataFrame(results)
+
+
+def likert_summary_by_group(df, likert_cols, group_col):
+    """Likert Agree or Strongly Agree analysis by gender or selected categorical group."""
+    if group_col is None or group_col not in df.columns or not likert_cols:
+        return pd.DataFrame()
+
+    results = []
+
+    for group, gdf in df.groupby(group_col):
+        for col in likert_cols:
+            series = pd.to_numeric(gdf[col], errors="coerce").dropna()
+            total = len(series)
+
+            if total == 0:
+                continue
+
+            agree_count = series[series >= 4].count()
+
+            results.append({
+                "Group variable": group_col,
+                "Group": group,
+                "Variable": col,
+                "Valid responses": total,
+                "Agree or Strongly Agree": int(agree_count),
+                "Percentage Agree or Above": round((agree_count / total) * 100, 2)
+            })
+
+    return pd.DataFrame(results)
+
+
+def yes_no_summary_by_group(df, yes_no_cols, group_col):
+    """Yes response percentage by gender or selected categorical group."""
+    if group_col is None or group_col not in df.columns or not yes_no_cols:
+        return pd.DataFrame()
+
+    results = []
+
+    for group, gdf in df.groupby(group_col):
+        for col in yes_no_cols:
+            series = gdf[col].dropna().astype(str).str.lower().str.strip()
+            total = len(series)
+
+            if total == 0:
+                continue
+
+            yes_count = series.isin(["yes", "1", "true"]).sum()
+
+            results.append({
+                "Group variable": group_col,
+                "Group": group,
+                "Variable": col,
+                "Valid responses": total,
+                "Yes responses": int(yes_count),
+                "Percentage Yes": round((yes_count / total) * 100, 2)
+            })
+
+    return pd.DataFrame(results)
+
+
+def categorical_frequency_by_group(df, categorical_cols, group_col):
+    """Frequency distribution of categorical variables by gender or selected group."""
+    if group_col is None or group_col not in df.columns or not categorical_cols:
+        return pd.DataFrame()
+
+    all_results = []
+
+    for group, gdf in df.groupby(group_col):
+        for col in categorical_cols:
+            if col == group_col:
+                continue
+
+            counts = gdf[col].fillna("Missing").astype(str).value_counts(dropna=False)
+            total = counts.sum()
+
+            for category, count in counts.items():
+                all_results.append({
+                    "Group variable": group_col,
+                    "Group": group,
+                    "Variable": col,
+                    "Category": category,
+                    "Frequency": int(count),
+                    "Percentage": round((count / total) * 100, 2) if total > 0 else 0
+                })
+
+    return pd.DataFrame(all_results)
+
+
+# -------------------------------------------------------------------
+# Visualization functions
+# -------------------------------------------------------------------
 
 def save_likert_bar_chart(summary_df, outpath):
     if summary_df.empty:
         return
 
-    fig, ax = plt.subplots(figsize=(12, 7))
-    plot_df = summary_df.sort_values("Percentage Agree or Above", ascending=True)
+    fig, ax = plt.subplots(figsize=(9, 5))
+    plot_df = summary_df.sort_values("Percentage Agree or Above", ascending=True).tail(15)
 
     ax.barh(plot_df["Variable"], plot_df["Percentage Agree or Above"])
     ax.set_xlabel("Percentage Agree or Strongly Agree")
-    ax.set_title("Likert-Scale Barrier Analysis")
+    ax.set_title("Top Likert-Scale Barriers")
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=300)
+    plt.close(fig)
+
+
+def save_grouped_likert_chart(summary_df, outpath, title="Gender-Disaggregated Likert Analysis"):
+    if summary_df.empty:
+        return
+
+    plot_df = summary_df.copy()
+
+    # Keep top variables by average agreement for readability
+    top_vars = (
+        plot_df.groupby("Variable")["Percentage Agree or Above"]
+        .mean()
+        .sort_values(ascending=False)
+        .head(10)
+        .index
+    )
+
+    plot_df = plot_df[plot_df["Variable"].isin(top_vars)]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    pivot = plot_df.pivot_table(
+        index="Variable",
+        columns="Group",
+        values="Percentage Agree or Above",
+        aggfunc="mean"
+    ).fillna(0)
+
+    pivot.plot(kind="barh", ax=ax)
+    ax.set_xlabel("Percentage Agree or Strongly Agree")
+    ax.set_title(title)
+    ax.legend(title="Group", loc="best")
     fig.tight_layout()
     fig.savefig(outpath, dpi=300)
     plt.close(fig)
@@ -140,21 +434,22 @@ def save_likert_bar_chart(summary_df, outpath):
 def save_numeric_histograms(df, numeric_cols, output_dir):
     saved_paths = []
 
-    for col in numeric_cols[:8]:
+    for col in numeric_cols[:12]:
         series = pd.to_numeric(df[col], errors="coerce").dropna()
 
         if series.empty:
             continue
 
-        fig, ax = plt.subplots(figsize=(8, 5))
-        ax.hist(series, bins=20)
-        ax.set_title(f"Distribution of {col}")
-        ax.set_xlabel(col)
-        ax.set_ylabel("Frequency")
+        fig, ax = plt.subplots(figsize=(4.5, 3.2))
+        ax.hist(series, bins=15)
+        ax.set_title(f"{col}", fontsize=9)
+        ax.set_xlabel(col, fontsize=8)
+        ax.set_ylabel("Frequency", fontsize=8)
+        ax.tick_params(axis="both", labelsize=7)
         fig.tight_layout()
 
-        outpath = output_dir / f"histogram_{col}.png"
-        fig.savefig(outpath, dpi=300)
+        outpath = output_dir / f"histogram_{safe_filename(col)}.png"
+        fig.savefig(outpath, dpi=220)
         plt.close(fig)
         saved_paths.append(outpath)
 
@@ -164,7 +459,7 @@ def save_numeric_histograms(df, numeric_cols, output_dir):
 def save_yes_no_pie_charts(df, yes_no_cols, output_dir):
     saved_paths = []
 
-    for col in yes_no_cols[:6]:
+    for col in yes_no_cols[:8]:
         series = df[col].dropna().astype(str).str.lower().str.strip()
         yes_count = series.isin(["yes", "1", "true"]).sum()
         no_count = series.isin(["no", "0", "false"]).sum()
@@ -172,20 +467,57 @@ def save_yes_no_pie_charts(df, yes_no_cols, output_dir):
         if yes_count + no_count == 0:
             continue
 
-        fig, ax = plt.subplots(figsize=(6, 6))
-        ax.pie([yes_count, no_count], labels=["Yes", "No"], autopct="%1.1f%%")
-        ax.set_title(f"Yes/No Distribution: {col}")
+        fig, ax = plt.subplots(figsize=(4.2, 3.2))
+        ax.pie([yes_count, no_count], labels=["Yes", "No"], autopct="%1.1f%%", textprops={"fontsize": 8})
+        ax.set_title(f"{col}", fontsize=9)
 
-        outpath = output_dir / f"pie_{col}.png"
-        fig.savefig(outpath, dpi=300)
+        outpath = output_dir / f"pie_{safe_filename(col)}.png"
+        fig.savefig(outpath, dpi=220)
         plt.close(fig)
         saved_paths.append(outpath)
 
     return saved_paths
 
 
+def save_categorical_bar_charts(df, categorical_cols, output_dir):
+    saved_paths = []
+
+    for col in categorical_cols[:12]:
+        counts = df[col].fillna("Missing").astype(str).value_counts().head(10)
+
+        if counts.empty:
+            continue
+
+        fig, ax = plt.subplots(figsize=(4.8, 3.2))
+        counts.sort_values().plot(kind="barh", ax=ax)
+        ax.set_title(f"{col}", fontsize=9)
+        ax.set_xlabel("Frequency", fontsize=8)
+        ax.tick_params(axis="both", labelsize=7)
+        fig.tight_layout()
+
+        outpath = output_dir / f"categorical_{safe_filename(col)}.png"
+        fig.savefig(outpath, dpi=220)
+        plt.close(fig)
+        saved_paths.append(outpath)
+
+    return saved_paths
+
+
+def show_figures_grid(image_paths, columns_per_row=4):
+    """Display smaller figures with at least four figures per row."""
+    if not image_paths:
+        st.info("No figures available for this section.")
+        return
+
+    for i in range(0, len(image_paths), columns_per_row):
+        cols = st.columns(columns_per_row)
+        for j, path in enumerate(image_paths[i:i + columns_per_row]):
+            with cols[j]:
+                st.image(str(path), use_container_width=True)
+
+
 def save_corr_heatmap(corr: pd.DataFrame, outpath: Path):
-    fig, ax = plt.subplots(figsize=(10, 7))
+    fig, ax = plt.subplots(figsize=(9, 6))
     sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", center=0, ax=ax)
     ax.set_title("Correlation Matrix")
     fig.tight_layout()
@@ -194,7 +526,7 @@ def save_corr_heatmap(corr: pd.DataFrame, outpath: Path):
 
 
 def save_path_diagram(paths: pd.DataFrame, outpath: Path):
-    fig, ax = plt.subplots(figsize=(11, 8))
+    fig, ax = plt.subplots(figsize=(10, 7))
     g = nx.DiGraph()
 
     for _, row in paths.iterrows():
@@ -220,6 +552,10 @@ def save_path_diagram(paths: pd.DataFrame, outpath: Path):
     plt.close(fig)
 
 
+# -------------------------------------------------------------------
+# Word report
+# -------------------------------------------------------------------
+
 def create_word_report(tables, figures, outpath: Path):
     doc = Document()
 
@@ -227,7 +563,7 @@ def create_word_report(tables, figures, outpath: Path):
 
     doc.add_paragraph(
         "This automated report summarizes data readiness, descriptive statistics, "
-        "Likert-scale barrier analysis, Yes/No response patterns, construct reliability, "
+        "categorical frequency distributions, gender-disaggregated findings, construct reliability, "
         "correlations, path coefficients, mediation tests, and SEM model fit where available."
     )
 
@@ -236,59 +572,73 @@ def create_word_report(tables, figures, outpath: Path):
 
     doc.add_heading("2. Descriptive Analysis", level=1)
 
-    doc.add_heading("2.1 Quantitative Variables", level=2)
-    if not tables["quantitative_summary"].empty:
-        add_docx_table(doc, tables["quantitative_summary"].head(30))
-    else:
-        doc.add_paragraph("No quantitative variables were detected.")
+    doc.add_heading("2.1 Quantitative Variables: Averages and Distribution", level=2)
+    add_docx_table(doc, tables["quantitative_summary"].head(40))
 
-    doc.add_heading("2.2 Likert-Scale Agree or Above Analysis", level=2)
-    if not tables["likert_agree_summary"].empty:
-        add_docx_table(doc, tables["likert_agree_summary"].head(30))
-    else:
-        doc.add_paragraph("No Likert-scale variables were detected.")
+    doc.add_heading("2.2 Categorical Variables: Frequency Distribution", level=2)
+    add_docx_table(doc, tables["categorical_frequency"].head(60))
+
+    doc.add_heading("2.3 Likert-Scale Agree or Above Analysis", level=2)
+    add_docx_table(doc, tables["likert_agree_summary"].head(40))
 
     if figures.get("likert_bar") and figures["likert_bar"].exists():
         doc.add_picture(str(figures["likert_bar"]), width=Inches(6.5))
 
-    doc.add_heading("2.3 Yes/No Variables", level=2)
-    if not tables["yes_no_summary"].empty:
-        add_docx_table(doc, tables["yes_no_summary"].head(30))
-    else:
-        doc.add_paragraph("No Yes/No variables were detected.")
+    doc.add_heading("2.4 Yes/No Variables", level=2)
+    add_docx_table(doc, tables["yes_no_summary"].head(40))
 
-    doc.add_heading("3. Reliability Summary", level=1)
-    if not tables["reliability"].empty:
-        add_docx_table(doc, tables["reliability"])
-    else:
-        doc.add_paragraph("No reliability table could be generated.")
+    doc.add_heading("3. Gender-Disaggregated Analysis: Men and Women Only", level=1)
+    doc.add_paragraph(
+        "This section includes only respondents coded as Men or Women. Other gender responses "
+        "are excluded from this specific disaggregation to meet the requested reporting format."
+    )
 
-    doc.add_heading("4. Correlation Heatmap", level=1)
+    doc.add_heading("3.1 Quantitative Averages by Gender", level=2)
+    add_docx_table(doc, tables["gender_quantitative"].head(60))
+
+    doc.add_heading("3.2 Likert Agreement by Gender", level=2)
+    add_docx_table(doc, tables["gender_likert"].head(60))
+
+    if figures.get("gender_likert") and figures["gender_likert"].exists():
+        doc.add_picture(str(figures["gender_likert"]), width=Inches(6.5))
+
+    doc.add_heading("3.3 Yes/No Responses by Gender", level=2)
+    add_docx_table(doc, tables["gender_yes_no"].head(60))
+
+    doc.add_heading("3.4 Categorical Frequency by Gender", level=2)
+    add_docx_table(doc, tables["gender_categorical"].head(60))
+
+    doc.add_heading("4. Reliability Summary", level=1)
+    add_docx_table(doc, tables["reliability"])
+
+    doc.add_heading("5. Correlation Heatmap", level=1)
     if figures.get("correlation") and figures["correlation"].exists():
         doc.add_picture(str(figures["correlation"]), width=Inches(6.5))
 
-    doc.add_heading("5. SEM Path Diagram", level=1)
+    doc.add_heading("6. SEM Path Diagram", level=1)
     if figures.get("paths") and figures["paths"].exists():
         doc.add_picture(str(figures["paths"]), width=Inches(6.5))
 
-    doc.add_heading("6. Path Coefficients", level=1)
-    if not tables["paths"].empty:
-        add_docx_table(doc, tables["paths"].head(20))
+    doc.add_heading("7. Path Coefficients", level=1)
+    add_docx_table(doc, tables["paths"].head(20))
 
-    doc.add_heading("7. Mediation Analysis", level=1)
-    if not tables["mediation"].empty:
-        add_docx_table(doc, tables["mediation"].head(20))
+    doc.add_heading("8. Mediation Analysis", level=1)
+    add_docx_table(doc, tables["mediation"].head(20))
 
-    doc.add_heading("8. Interpretation Notes", level=1)
+    doc.add_heading("9. Interpretation Notes", level=1)
     doc.add_paragraph(
-        "Likert-scale results show the percentage of respondents who agreed or strongly agreed "
-        "that a specific issue is a barrier. Yes/No results show the share of respondents who answered Yes. "
-        "Quantitative summaries describe central tendency and variation for variables such as age, income, and expenses."
+        "Likert-scale results show the percentage of respondents who agreed or strongly agreed. "
+        "Yes/No results show the share of respondents who answered Yes. Quantitative results show averages "
+        "and other descriptive statistics. Gender-disaggregated results compare Men and Women only."
     )
 
     doc.save(outpath)
     return outpath
 
+
+# -------------------------------------------------------------------
+# Streamlit app
+# -------------------------------------------------------------------
 
 uploaded = st.file_uploader("Upload EMERGE newcomer dataset", type=["csv", "xlsx", "xls"])
 
@@ -318,11 +668,26 @@ st.dataframe(mapping, use_container_width=True)
 numeric_cols = detect_numeric_variables(df)
 likert_cols = detect_likert_variables(df)
 yes_no_cols = detect_yes_no_variables(df)
+categorical_cols = detect_categorical_variables(df, numeric_cols=numeric_cols)
 
-quant_summary = quantitative_summary(df, numeric_cols)
-likert_summary = likert_agree_summary(df, likert_cols)
-yes_no_results = yes_no_summary(df, yes_no_cols)
+gender_col = find_gender_column(df)
+df_gender, gender_group_col = standardize_gender_for_men_women(df, gender_col)
 
+st.sidebar.header("Reader-Friendly Analysis Options")
+st.sidebar.caption("Choose additional grouping variables if you want analysis beyond gender.")
+
+available_group_vars = [
+    col for col in categorical_cols
+    if col != gender_col and df[col].nunique(dropna=True) <= 20
+]
+
+selected_group_vars = st.sidebar.multiselect(
+    "Optional: choose other categorical variables for disaggregated analysis",
+    options=available_group_vars,
+    default=[]
+)
+
+# Original SEM workflow remains unchanged
 scores = construct_scores(df)
 desc = descriptive_stats(df)
 rel, loadings = reliability_table(df)
@@ -331,19 +696,44 @@ paths = path_coefficients(scores)
 med = mediation_analysis(scores)
 _, sem_estimates, sem_fit = semopy_model(scores)
 
+# New descriptive summaries
+quant_summary = quantitative_summary(df, numeric_cols)
+categorical_freq = categorical_frequency_summary(df, categorical_cols)
+likert_summary = likert_agree_summary(df, likert_cols)
+yes_no_results = yes_no_summary(df, yes_no_cols)
+
+# Gender-disaggregated summaries: Men and Women only
+gender_quant = quantitative_summary_by_group(df_gender, numeric_cols, gender_group_col)
+gender_likert = likert_summary_by_group(df_gender, likert_cols, gender_group_col)
+gender_yes_no = yes_no_summary_by_group(df_gender, yes_no_cols, gender_group_col)
+gender_categorical = categorical_frequency_by_group(df_gender, categorical_cols, gender_group_col)
+
+# Optional categorical disaggregation selected by client/user
+optional_group_tables = {}
+for group_col in selected_group_vars:
+    optional_group_tables[f"{group_col}_quantitative"] = quantitative_summary_by_group(df, numeric_cols, group_col)
+    optional_group_tables[f"{group_col}_likert"] = likert_summary_by_group(df, likert_cols, group_col)
+    optional_group_tables[f"{group_col}_yes_no"] = yes_no_summary_by_group(df, yes_no_cols, group_col)
+    optional_group_tables[f"{group_col}_categorical"] = categorical_frequency_by_group(df, categorical_cols, group_col)
+
+# Save figures
 fig_corr = OUTPUT_ROOT / "figures" / "correlation_heatmap.png"
 fig_paths = OUTPUT_ROOT / "figures" / "sem_path_diagram.png"
 fig_likert = OUTPUT_ROOT / "figures" / "likert_bar_chart.png"
+fig_gender_likert = OUTPUT_ROOT / "figures" / "gender_likert_bar_chart.png"
 
 if not corr.empty:
     save_corr_heatmap(corr, fig_corr)
 
 save_path_diagram(paths, fig_paths)
 save_likert_bar_chart(likert_summary, fig_likert)
+save_grouped_likert_chart(gender_likert, fig_gender_likert)
 
 histogram_paths = save_numeric_histograms(df, numeric_cols, OUTPUT_ROOT / "figures")
 pie_paths = save_yes_no_pie_charts(df, yes_no_cols, OUTPUT_ROOT / "figures")
+categorical_chart_paths = save_categorical_bar_charts(df, categorical_cols, OUTPUT_ROOT / "figures")
 
+# Save processed outputs
 processed_path = OUTPUT_ROOT / "processed_data" / "cleaned_emerge_dataset.csv"
 scores_path = OUTPUT_ROOT / "processed_data" / "construct_scores.csv"
 
@@ -354,8 +744,13 @@ all_tables = {
     "variable_mapping": mapping,
     "descriptive_stats": desc,
     "quantitative_summary": quant_summary,
+    "categorical_frequency": categorical_freq,
     "likert_agree_summary": likert_summary,
     "yes_no_summary": yes_no_results,
+    "gender_quantitative": gender_quant,
+    "gender_likert": gender_likert,
+    "gender_yes_no": gender_yes_no,
+    "gender_categorical": gender_categorical,
     "reliability": rel,
     "factor_loadings": loadings,
     "correlation_matrix": corr.reset_index(),
@@ -364,6 +759,9 @@ all_tables = {
     "sem_estimates": sem_estimates,
     "sem_fit": sem_fit,
 }
+
+# Add optional selected group analysis into Excel workbook
+all_tables.update(optional_group_tables)
 
 excel_path = OUTPUT_ROOT / "tables" / "emerge_sem_results.xlsx"
 write_excel(all_tables, excel_path)
@@ -375,16 +773,22 @@ create_word_report(
         "correlation": fig_corr,
         "paths": fig_paths,
         "likert_bar": fig_likert,
+        "gender_likert": fig_gender_likert,
     },
     report_path
 )
+
+# -------------------------------------------------------------------
+# Display results
+# -------------------------------------------------------------------
 
 st.subheader("Analysis results")
 
 tabs = st.tabs([
     "Descriptives",
-    "Likert Barriers",
-    "Yes/No Analysis",
+    "Categorical Frequencies",
+    "Gender Analysis",
+    "Optional Group Analysis",
     "Visuals",
     "Reliability",
     "Correlations",
@@ -394,56 +798,116 @@ tabs = st.tabs([
 ])
 
 with tabs[0]:
-    st.subheader("Quantitative Descriptive Statistics")
+    st.subheader("Quantitative Variables: Average and Descriptive Statistics")
+    st.caption("This table provides averages and descriptive statistics for all quantitative variables.")
     st.dataframe(quant_summary, use_container_width=True)
 
     st.subheader("Existing Descriptive Statistics")
     st.dataframe(desc, use_container_width=True)
 
 with tabs[1]:
+    st.subheader("Frequency Distribution for Categorical Variables")
+    st.caption("This table shows frequency and percentage distribution for categorical variables.")
+    st.dataframe(categorical_freq, use_container_width=True)
+
     st.subheader("Likert-Scale Agree or Strongly Agree Analysis")
     st.dataframe(likert_summary, use_container_width=True)
 
-    if fig_likert.exists():
-        st.image(str(fig_likert))
-
-with tabs[2]:
     st.subheader("Yes/No Response Analysis")
     st.dataframe(yes_no_results, use_container_width=True)
 
-with tabs[3]:
-    st.subheader("Histograms for Quantitative Variables")
-    for path in histogram_paths:
-        st.image(str(path))
+with tabs[2]:
+    st.subheader("Gender-Disaggregated Analysis: Men and Women Only")
 
-    st.subheader("Pie Charts for Yes/No Variables")
-    for path in pie_paths:
-        st.image(str(path))
+    if gender_col is None:
+        st.warning("No gender column was detected. Please ensure the dataset has a column named gender, sex, respondent_gender, or participant_gender.")
+    elif df_gender.empty:
+        st.warning("A gender column was detected, but no valid Men/Women records were found after recoding.")
+    else:
+        st.caption(f"Detected gender column: {gender_col}. Analysis below excludes third-option or other responses for this specific gender comparison.")
+
+        st.markdown("#### Quantitative Averages by Gender")
+        st.dataframe(gender_quant, use_container_width=True)
+
+        st.markdown("#### Likert Agreement by Gender")
+        st.dataframe(gender_likert, use_container_width=True)
+
+        if fig_gender_likert.exists():
+            st.image(str(fig_gender_likert), use_container_width=True)
+
+        st.markdown("#### Yes/No Responses by Gender")
+        st.dataframe(gender_yes_no, use_container_width=True)
+
+        st.markdown("#### Categorical Frequencies by Gender")
+        st.dataframe(gender_categorical, use_container_width=True)
+
+with tabs[3]:
+    st.subheader("Optional Disaggregated Analysis by Selected Categorical Variables")
+    st.caption("Use the sidebar to choose categorical variables such as region, education, age group, country of origin, or employment status.")
+
+    if not selected_group_vars:
+        st.info("No additional categorical variable selected. Use the sidebar to choose one or more variables.")
+    else:
+        for group_col in selected_group_vars:
+            st.markdown(f"### Analysis by {group_col}")
+
+            st.markdown("#### Quantitative Averages")
+            st.dataframe(optional_group_tables.get(f"{group_col}_quantitative", pd.DataFrame()), use_container_width=True)
+
+            st.markdown("#### Likert Agreement")
+            st.dataframe(optional_group_tables.get(f"{group_col}_likert", pd.DataFrame()), use_container_width=True)
+
+            st.markdown("#### Yes/No Responses")
+            st.dataframe(optional_group_tables.get(f"{group_col}_yes_no", pd.DataFrame()), use_container_width=True)
+
+            st.markdown("#### Categorical Frequency")
+            st.dataframe(optional_group_tables.get(f"{group_col}_categorical", pd.DataFrame()), use_container_width=True)
 
 with tabs[4]:
+    st.subheader("Reader-Friendly Visual Summary")
+    st.caption("Figures are shown in a compact layout with four visuals per row.")
+
+    st.markdown("#### Quantitative Histograms")
+    show_figures_grid(histogram_paths, columns_per_row=4)
+
+    st.markdown("#### Categorical Bar Charts")
+    show_figures_grid(categorical_chart_paths, columns_per_row=4)
+
+    st.markdown("#### Yes/No Pie Charts")
+    show_figures_grid(pie_paths, columns_per_row=4)
+
+    st.markdown("#### Key Likert and Gender Visuals")
+    main_visuals = [p for p in [fig_likert, fig_gender_likert, fig_corr, fig_paths] if p.exists()]
+    show_figures_grid(main_visuals, columns_per_row=4)
+
+with tabs[5]:
     st.dataframe(rel, use_container_width=True)
     st.dataframe(loadings, use_container_width=True)
 
-with tabs[5]:
+with tabs[6]:
     if fig_corr.exists():
-        st.image(str(fig_corr))
+        st.image(str(fig_corr), use_container_width=True)
     st.dataframe(corr, use_container_width=True)
 
-with tabs[6]:
+with tabs[7]:
     if fig_paths.exists():
-        st.image(str(fig_paths))
+        st.image(str(fig_paths), use_container_width=True)
     st.dataframe(paths, use_container_width=True)
 
-with tabs[7]:
+with tabs[8]:
     st.dataframe(med, use_container_width=True)
 
-with tabs[8]:
+with tabs[9]:
     st.dataframe(sem_estimates, use_container_width=True)
     st.dataframe(sem_fit, use_container_width=True)
 
+# -------------------------------------------------------------------
+# Download outputs
+# -------------------------------------------------------------------
+
 st.subheader("Download outputs")
 
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 
 with open(excel_path, "rb") as f:
     c1.download_button(
@@ -464,4 +928,11 @@ with open(processed_path, "rb") as f:
         "Download cleaned CSV",
         f,
         file_name="cleaned_emerge_dataset.csv"
+    )
+
+with open(scores_path, "rb") as f:
+    c4.download_button(
+        "Download construct scores",
+        f,
+        file_name="construct_scores.csv"
     )
