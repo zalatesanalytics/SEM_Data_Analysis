@@ -1,6 +1,7 @@
 
 from pathlib import Path
 import re
+import numpy as np
 import matplotlib.pyplot as plt
 import networkx as nx
 import pandas as pd
@@ -8,6 +9,11 @@ import seaborn as sns
 import streamlit as st
 from docx import Document
 from docx.shared import Inches
+
+try:
+    from scipy import stats
+except Exception:
+    stats = None
 
 from sem_engine import (
     load_data, normalize_columns, coerce_analysis_columns, variable_mapping,
@@ -26,6 +32,63 @@ st.caption(
 OUTPUT_ROOT = Path("outputs")
 for sub in ["tables", "figures", "processed_data", "model_outputs"]:
     (OUTPUT_ROOT / sub).mkdir(parents=True, exist_ok=True)
+
+
+# -------------------------------------------------------------------
+# Dashboard styling
+# -------------------------------------------------------------------
+
+st.markdown(
+    """
+    <style>
+    .main .block-container {
+        padding-top: 1.2rem;
+        padding-bottom: 2rem;
+    }
+    .dashboard-hero {
+        padding: 1.2rem 1.4rem;
+        border-radius: 18px;
+        background: linear-gradient(135deg, #f7fbff 0%, #eef4ff 50%, #f7f7fb 100%);
+        border: 1px solid #e7edf7;
+        margin-bottom: 1rem;
+    }
+    .hero-title {
+        font-size: 1.55rem;
+        font-weight: 750;
+        color: #1f2937;
+        margin-bottom: 0.2rem;
+    }
+    .hero-text {
+        font-size: 0.98rem;
+        color: #4b5563;
+    }
+    .section-card {
+        padding: 1rem;
+        border-radius: 16px;
+        border: 1px solid #e5e7eb;
+        background-color: #ffffff;
+        box-shadow: 0 1px 8px rgba(31, 41, 55, 0.06);
+        margin-bottom: 1rem;
+    }
+    .insight-box {
+        padding: 0.85rem 1rem;
+        border-radius: 14px;
+        background-color: #f9fafb;
+        border-left: 5px solid #94a3b8;
+        margin-bottom: 0.6rem;
+        font-size: 0.95rem;
+    }
+    div[data-testid="stMetric"] {
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        padding: 0.8rem;
+        border-radius: 16px;
+        box-shadow: 0 1px 8px rgba(31, 41, 55, 0.05);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # -------------------------------------------------------------------
@@ -378,6 +441,214 @@ def categorical_frequency_by_group(df, categorical_cols, group_col):
     return pd.DataFrame(all_results)
 
 
+def format_p_value(p_value):
+    """Format p-values for reader-friendly reporting."""
+    if pd.isna(p_value):
+        return "Not available"
+    if p_value < 0.001:
+        return "<0.001"
+    return round(float(p_value), 4)
+
+
+def significance_label(p_value):
+    """Create a simple interpretation label for p-values."""
+    if pd.isna(p_value):
+        return "Not tested"
+    if p_value < 0.001:
+        return "Highly significant"
+    if p_value < 0.01:
+        return "Significant at 1%"
+    if p_value < 0.05:
+        return "Significant at 5%"
+    if p_value < 0.10:
+        return "Marginally significant"
+    return "Not significant"
+
+
+def quantitative_gender_comparison_table(df_gender, numeric_cols, gender_group_col):
+    """
+    Create variable-by-variable quantitative comparison table:
+    Variable | Men mean | Women mean | Difference | p-value.
+    Difference is Men minus Women.
+    """
+    if gender_group_col is None or df_gender.empty or not numeric_cols:
+        return pd.DataFrame()
+
+    results = []
+    for col in numeric_cols:
+        men = pd.to_numeric(
+            df_gender.loc[df_gender[gender_group_col] == "Men", col],
+            errors="coerce"
+        ).dropna()
+        women = pd.to_numeric(
+            df_gender.loc[df_gender[gender_group_col] == "Women", col],
+            errors="coerce"
+        ).dropna()
+
+        if len(men) == 0 and len(women) == 0:
+            continue
+
+        men_mean = men.mean() if len(men) > 0 else np.nan
+        women_mean = women.mean() if len(women) > 0 else np.nan
+        difference = men_mean - women_mean if pd.notna(men_mean) and pd.notna(women_mean) else np.nan
+
+        p_value = np.nan
+        test_used = "Welch t-test"
+        if stats is not None and len(men) >= 2 and len(women) >= 2:
+            try:
+                _, p_value = stats.ttest_ind(men, women, equal_var=False, nan_policy="omit")
+            except Exception:
+                p_value = np.nan
+
+        results.append({
+            "Variable / Indicator": col,
+            "Men: average / mean": round(men_mean, 2) if pd.notna(men_mean) else "",
+            "Women: average / mean": round(women_mean, 2) if pd.notna(women_mean) else "",
+            "Difference (Men - Women)": round(difference, 2) if pd.notna(difference) else "",
+            "p-value": format_p_value(p_value),
+            "Significance Level": significance_label(p_value),
+            "Men N": int(len(men)),
+            "Women N": int(len(women)),
+            "Test used": test_used if stats is not None else "Install scipy to calculate p-values"
+        })
+
+    return pd.DataFrame(results)
+
+
+def quantitative_by_category_comparison(df, numeric_cols, group_col):
+    """
+    For categorical variables with multiple categories, show quantitative averages by category
+    and include an ANOVA p-value when appropriate.
+    """
+    if group_col is None or group_col not in df.columns or not numeric_cols:
+        return pd.DataFrame()
+
+    results = []
+    group_series = df[group_col].fillna("Missing").astype(str)
+    group_values = [g for g in group_series.unique() if g != "Missing"]
+
+    for col in numeric_cols:
+        valid = pd.DataFrame({
+            group_col: group_series,
+            col: pd.to_numeric(df[col], errors="coerce")
+        }).dropna(subset=[col])
+
+        if valid.empty:
+            continue
+
+        grouped_values = []
+        for group, gdf in valid.groupby(group_col):
+            values = gdf[col].dropna()
+            if len(values) > 0:
+                grouped_values.append(values)
+
+        p_value = np.nan
+        test_used = "ANOVA"
+        if stats is not None and len(grouped_values) >= 2 and all(len(x) >= 2 for x in grouped_values):
+            try:
+                _, p_value = stats.f_oneway(*grouped_values)
+            except Exception:
+                p_value = np.nan
+
+        for group, gdf in valid.groupby(group_col):
+            values = gdf[col].dropna()
+            if len(values) == 0:
+                continue
+            results.append({
+                "Grouping Variable": group_col,
+                "Category": group,
+                "Variable / Indicator": col,
+                "N": int(len(values)),
+                "Average / Mean": round(values.mean(), 2),
+                "Median": round(values.median(), 2),
+                "Standard deviation": round(values.std(), 2) if len(values) > 1 else 0,
+                "Minimum": round(values.min(), 2),
+                "Maximum": round(values.max(), 2),
+                "Comparison p-value": format_p_value(p_value),
+                "Significance Level": significance_label(p_value),
+                "Test used": test_used if stats is not None else "Install scipy to calculate p-values"
+            })
+
+    return pd.DataFrame(results)
+
+
+def categorical_proportion_by_category(df, categorical_cols, group_col):
+    """
+    For categorical outcomes, show proportions within each selected category/group.
+    Chi-square p-value is added where a contingency table can be tested.
+    """
+    if group_col is None or group_col not in df.columns or not categorical_cols:
+        return pd.DataFrame()
+
+    results = []
+
+    for col in categorical_cols:
+        if col == group_col:
+            continue
+
+        temp = df[[group_col, col]].copy()
+        temp[group_col] = temp[group_col].fillna("Missing").astype(str)
+        temp[col] = temp[col].fillna("Missing").astype(str)
+
+        p_value = np.nan
+        test_used = "Chi-square"
+        if stats is not None:
+            try:
+                ctab = pd.crosstab(temp[group_col], temp[col])
+                if ctab.shape[0] >= 2 and ctab.shape[1] >= 2:
+                    _, p_value, _, _ = stats.chi2_contingency(ctab)
+            except Exception:
+                p_value = np.nan
+
+        for group, gdf in temp.groupby(group_col):
+            total = len(gdf)
+            counts = gdf[col].value_counts(dropna=False)
+            for category, count in counts.items():
+                results.append({
+                    "Grouping Variable": group_col,
+                    "Group / Category": group,
+                    "Categorical Variable": col,
+                    "Response Category": category,
+                    "Frequency": int(count),
+                    "Proportion / Percentage": round((count / total) * 100, 2) if total > 0 else 0,
+                    "Comparison p-value": format_p_value(p_value),
+                    "Significance Level": significance_label(p_value),
+                    "Test used": test_used if stats is not None else "Install scipy to calculate p-values"
+                })
+
+    return pd.DataFrame(results)
+
+
+def build_summary_insights(df, quant_summary, likert_summary, yes_no_results, gender_comparison):
+    """Create short automated findings for the top of the dashboard."""
+    insights = []
+    insights.append(f"The uploaded dataset contains {df.shape[0]:,} records and {df.shape[1]:,} variables.")
+
+    if not quant_summary.empty and "Mean / Average" in quant_summary.columns:
+        top_numeric = quant_summary.sort_values("Valid responses", ascending=False).head(1)
+        if not top_numeric.empty:
+            row = top_numeric.iloc[0]
+            insights.append(f"Most complete quantitative variable: {row['Variable']} with average {row['Mean / Average']} based on {int(row['Valid responses']):,} valid responses.")
+
+    if not likert_summary.empty:
+        top_barrier = likert_summary.sort_values("Percentage Agree or Above", ascending=False).head(1).iloc[0]
+        insights.append(f"Highest agreement item: {top_barrier['Variable']} at {top_barrier['Percentage Agree or Above']}% Agree/Strongly Agree.")
+
+    if not yes_no_results.empty:
+        top_yes = yes_no_results.sort_values("Percentage Yes", ascending=False).head(1).iloc[0]
+        insights.append(f"Highest Yes response: {top_yes['Variable']} at {top_yes['Percentage Yes']}% Yes.")
+
+    if not gender_comparison.empty:
+        sig = gender_comparison[gender_comparison["Significance Level"].astype(str).str.contains("Significant|Highly", case=False, na=False)]
+        if not sig.empty:
+            row = sig.iloc[0]
+            insights.append(f"Gender comparison highlight: {row['Variable / Indicator']} shows a statistically meaningful Men/Women difference with p-value {row['p-value']}.")
+        else:
+            insights.append("Gender comparison table was generated for Men and Women; no statistically significant differences were detected at the 5% level based on available data.")
+
+    return insights
+
+
 # -------------------------------------------------------------------
 # Visualization functions
 # -------------------------------------------------------------------
@@ -596,6 +867,9 @@ def create_word_report(tables, figures, outpath: Path):
     doc.add_heading("3.1 Quantitative Averages by Gender", level=2)
     add_docx_table(doc, tables["gender_quantitative"].head(60))
 
+    doc.add_heading("3.2 Quantitative Men/Women Comparison with p-values", level=2)
+    add_docx_table(doc, tables["gender_quantitative_comparison"].head(80))
+
     doc.add_heading("3.2 Likert Agreement by Gender", level=2)
     add_docx_table(doc, tables["gender_likert"].head(60))
 
@@ -654,16 +928,7 @@ raw = load_data(uploaded)
 df = normalize_columns(raw)
 df = coerce_analysis_columns(df)
 
-st.subheader("Dataset overview")
-col1, col2, col3 = st.columns(3)
-col1.metric("Rows", f"{df.shape[0]:,}")
-col2.metric("Columns", f"{df.shape[1]:,}")
-col3.metric("Duplicated rows", int(df.duplicated().sum()))
-st.dataframe(df.head(), use_container_width=True)
-
 mapping = variable_mapping(df)
-st.subheader("Variable mapping")
-st.dataframe(mapping, use_container_width=True)
 
 numeric_cols = detect_numeric_variables(df)
 likert_cols = detect_likert_variables(df)
@@ -704,6 +969,7 @@ yes_no_results = yes_no_summary(df, yes_no_cols)
 
 # Gender-disaggregated summaries: Men and Women only
 gender_quant = quantitative_summary_by_group(df_gender, numeric_cols, gender_group_col)
+gender_quant_comparison = quantitative_gender_comparison_table(df_gender, numeric_cols, gender_group_col)
 gender_likert = likert_summary_by_group(df_gender, likert_cols, gender_group_col)
 gender_yes_no = yes_no_summary_by_group(df_gender, yes_no_cols, gender_group_col)
 gender_categorical = categorical_frequency_by_group(df_gender, categorical_cols, gender_group_col)
@@ -711,7 +977,8 @@ gender_categorical = categorical_frequency_by_group(df_gender, categorical_cols,
 # Optional categorical disaggregation selected by client/user
 optional_group_tables = {}
 for group_col in selected_group_vars:
-    optional_group_tables[f"{group_col}_quantitative"] = quantitative_summary_by_group(df, numeric_cols, group_col)
+    optional_group_tables[f"{group_col}_quantitative"] = quantitative_by_category_comparison(df, numeric_cols, group_col)
+    optional_group_tables[f"{group_col}_categorical_proportions"] = categorical_proportion_by_category(df, categorical_cols, group_col)
     optional_group_tables[f"{group_col}_likert"] = likert_summary_by_group(df, likert_cols, group_col)
     optional_group_tables[f"{group_col}_yes_no"] = yes_no_summary_by_group(df, yes_no_cols, group_col)
     optional_group_tables[f"{group_col}_categorical"] = categorical_frequency_by_group(df, categorical_cols, group_col)
@@ -748,6 +1015,7 @@ all_tables = {
     "likert_agree_summary": likert_summary,
     "yes_no_summary": yes_no_results,
     "gender_quantitative": gender_quant,
+    "gender_quantitative_comparison": gender_quant_comparison,
     "gender_likert": gender_likert,
     "gender_yes_no": gender_yes_no,
     "gender_categorical": gender_categorical,
@@ -782,14 +1050,79 @@ create_word_report(
 # Display results
 # -------------------------------------------------------------------
 
-st.subheader("Analysis results")
+summary_insights = build_summary_insights(
+    df=df,
+    quant_summary=quant_summary,
+    likert_summary=likert_summary,
+    yes_no_results=yes_no_results,
+    gender_comparison=gender_quant_comparison,
+)
+
+st.markdown(
+    """
+    <div class="dashboard-hero">
+        <div class="hero-title">Analysis Results and Key Findings</div>
+        <div class="hero-text">The most important findings are presented first, followed by detailed tables, visuals, SEM outputs, and downloadable files.</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+metric_cols = st.columns(4)
+metric_cols[0].metric("Records", f"{df.shape[0]:,}")
+metric_cols[1].metric("Variables", f"{df.shape[1]:,}")
+metric_cols[2].metric("Quantitative variables", f"{len(numeric_cols):,}")
+metric_cols[3].metric("Categorical variables", f"{len(categorical_cols):,}")
+
+st.markdown('<div class="section-card">', unsafe_allow_html=True)
+st.markdown("#### Automated Summary Insights")
+for insight in summary_insights:
+    st.markdown(f'<div class="insight-box">{insight}</div>', unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
+
+st.markdown("### Priority Analysis Tables")
+priority_tabs = st.tabs([
+    "Quantitative by Gender",
+    "Averages for Quantitative Variables",
+    "Categorical Frequencies",
+    "Likert and Yes/No Summary"
+])
+
+with priority_tabs[0]:
+    st.markdown("#### Variable-by-variable quantitative analysis: Men and Women")
+    st.caption("Difference is calculated as Men average minus Women average. P-values use Welch's t-test when scipy is installed and sufficient observations are available.")
+    if gender_col is None:
+        st.warning("No gender column was detected. Please include a gender, sex, respondent_gender, or participant_gender column.")
+    elif gender_quant_comparison.empty:
+        st.warning("No valid Men/Women comparison could be generated from the available data.")
+    else:
+        st.dataframe(gender_quant_comparison, use_container_width=True)
+
+with priority_tabs[1]:
+    st.markdown("#### Averages and descriptive statistics for all quantitative variables")
+    st.dataframe(quant_summary, use_container_width=True)
+
+with priority_tabs[2]:
+    st.markdown("#### Frequency distribution for categorical variables")
+    st.dataframe(categorical_freq, use_container_width=True)
+
+with priority_tabs[3]:
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("#### Likert: Agree or Strongly Agree")
+        st.dataframe(likert_summary, use_container_width=True)
+    with c2:
+        st.markdown("#### Yes/No: Percentage Yes")
+        st.dataframe(yes_no_results, use_container_width=True)
+
+st.markdown("### Detailed Results")
 
 tabs = st.tabs([
-    "Descriptives",
-    "Categorical Frequencies",
-    "Gender Analysis",
-    "Optional Group Analysis",
-    "Visuals",
+    "Optional Category Analysis",
+    "Visual Dashboard",
+    "Dataset Overview",
+    "Variable Mapping",
+    "Gender Details",
     "Reliability",
     "Correlations",
     "Paths",
@@ -798,74 +1131,34 @@ tabs = st.tabs([
 ])
 
 with tabs[0]:
-    st.subheader("Quantitative Variables: Average and Descriptive Statistics")
-    st.caption("This table provides averages and descriptive statistics for all quantitative variables.")
-    st.dataframe(quant_summary, use_container_width=True)
-
-    st.subheader("Existing Descriptive Statistics")
-    st.dataframe(desc, use_container_width=True)
-
-with tabs[1]:
-    st.subheader("Frequency Distribution for Categorical Variables")
-    st.caption("This table shows frequency and percentage distribution for categorical variables.")
-    st.dataframe(categorical_freq, use_container_width=True)
-
-    st.subheader("Likert-Scale Agree or Strongly Agree Analysis")
-    st.dataframe(likert_summary, use_container_width=True)
-
-    st.subheader("Yes/No Response Analysis")
-    st.dataframe(yes_no_results, use_container_width=True)
-
-with tabs[2]:
-    st.subheader("Gender-Disaggregated Analysis: Men and Women Only")
-
-    if gender_col is None:
-        st.warning("No gender column was detected. Please ensure the dataset has a column named gender, sex, respondent_gender, or participant_gender.")
-    elif df_gender.empty:
-        st.warning("A gender column was detected, but no valid Men/Women records were found after recoding.")
-    else:
-        st.caption(f"Detected gender column: {gender_col}. Analysis below excludes third-option or other responses for this specific gender comparison.")
-
-        st.markdown("#### Quantitative Averages by Gender")
-        st.dataframe(gender_quant, use_container_width=True)
-
-        st.markdown("#### Likert Agreement by Gender")
-        st.dataframe(gender_likert, use_container_width=True)
-
-        if fig_gender_likert.exists():
-            st.image(str(fig_gender_likert), use_container_width=True)
-
-        st.markdown("#### Yes/No Responses by Gender")
-        st.dataframe(gender_yes_no, use_container_width=True)
-
-        st.markdown("#### Categorical Frequencies by Gender")
-        st.dataframe(gender_categorical, use_container_width=True)
-
-with tabs[3]:
-    st.subheader("Optional Disaggregated Analysis by Selected Categorical Variables")
-    st.caption("Use the sidebar to choose categorical variables such as region, education, age group, country of origin, or employment status.")
+    st.subheader("Optional Disaggregated Analysis by Client-Selected Categorical Variables")
+    st.caption("Use the sidebar to choose variables such as city, region, education level, employment status, country of origin, or age group. For variables with more than two categories, the app shows category-level averages/proportions and comparison statistics where appropriate.")
 
     if not selected_group_vars:
-        st.info("No additional categorical variable selected. Use the sidebar to choose one or more variables.")
+        st.info("No additional categorical variable selected. Use the sidebar to choose one or more variables for category-level analysis.")
     else:
         for group_col in selected_group_vars:
             st.markdown(f"### Analysis by {group_col}")
 
-            st.markdown("#### Quantitative Averages")
+            st.markdown("#### Quantitative variables by category with comparison p-values")
             st.dataframe(optional_group_tables.get(f"{group_col}_quantitative", pd.DataFrame()), use_container_width=True)
 
-            st.markdown("#### Likert Agreement")
+            st.markdown("#### Categorical proportions by category with chi-square p-values")
+            st.dataframe(optional_group_tables.get(f"{group_col}_categorical_proportions", pd.DataFrame()), use_container_width=True)
+
+            st.markdown("#### Likert Agreement by Category")
             st.dataframe(optional_group_tables.get(f"{group_col}_likert", pd.DataFrame()), use_container_width=True)
 
-            st.markdown("#### Yes/No Responses")
+            st.markdown("#### Yes/No Responses by Category")
             st.dataframe(optional_group_tables.get(f"{group_col}_yes_no", pd.DataFrame()), use_container_width=True)
 
-            st.markdown("#### Categorical Frequency")
-            st.dataframe(optional_group_tables.get(f"{group_col}_categorical", pd.DataFrame()), use_container_width=True)
+with tabs[1]:
+    st.subheader("Reader-Friendly Visual Dashboard")
+    st.caption("Figures are intentionally compact and displayed four per row for easier scanning.")
 
-with tabs[4]:
-    st.subheader("Reader-Friendly Visual Summary")
-    st.caption("Figures are shown in a compact layout with four visuals per row.")
+    st.markdown("#### Key Summary Visuals")
+    main_visuals = [p for p in [fig_likert, fig_gender_likert, fig_corr, fig_paths] if p.exists()]
+    show_figures_grid(main_visuals, columns_per_row=4)
 
     st.markdown("#### Quantitative Histograms")
     show_figures_grid(histogram_paths, columns_per_row=4)
@@ -876,9 +1169,38 @@ with tabs[4]:
     st.markdown("#### Yes/No Pie Charts")
     show_figures_grid(pie_paths, columns_per_row=4)
 
-    st.markdown("#### Key Likert and Gender Visuals")
-    main_visuals = [p for p in [fig_likert, fig_gender_likert, fig_corr, fig_paths] if p.exists()]
-    show_figures_grid(main_visuals, columns_per_row=4)
+with tabs[2]:
+    st.subheader("Dataset overview")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Rows", f"{df.shape[0]:,}")
+    col2.metric("Columns", f"{df.shape[1]:,}")
+    col3.metric("Duplicated rows", int(df.duplicated().sum()))
+    st.dataframe(df.head(), use_container_width=True)
+
+with tabs[3]:
+    st.subheader("Variable mapping")
+    st.dataframe(mapping, use_container_width=True)
+
+with tabs[4]:
+    st.subheader("Gender-Disaggregated Details: Men and Women Only")
+    if gender_col is None:
+        st.warning("No gender column was detected.")
+    elif df_gender.empty:
+        st.warning("A gender column was detected, but no valid Men/Women records were found after recoding.")
+    else:
+        st.caption(f"Detected gender column: {gender_col}. Other gender responses are excluded only from this Men/Women comparison section.")
+        st.markdown("#### Required comparison table: quantitative variables by gender")
+        st.dataframe(gender_quant_comparison, use_container_width=True)
+        st.markdown("#### Detailed quantitative averages by gender")
+        st.dataframe(gender_quant, use_container_width=True)
+        st.markdown("#### Likert agreement by gender")
+        st.dataframe(gender_likert, use_container_width=True)
+        if fig_gender_likert.exists():
+            st.image(str(fig_gender_likert), use_container_width=True)
+        st.markdown("#### Yes/No responses by gender")
+        st.dataframe(gender_yes_no, use_container_width=True)
+        st.markdown("#### Categorical frequencies by gender")
+        st.dataframe(gender_categorical, use_container_width=True)
 
 with tabs[5]:
     st.dataframe(rel, use_container_width=True)
