@@ -327,6 +327,79 @@ def yes_no_summary(df, yes_no_cols):
     return pd.DataFrame(results)
 
 
+
+def likert_full_distribution(df, likert_cols):
+    """Show full Likert response distribution: Strongly Disagree to Strongly Agree."""
+    if not likert_cols:
+        return pd.DataFrame()
+
+    labels = {
+        1: "Strongly Disagree",
+        2: "Disagree",
+        3: "Neutral",
+        4: "Agree",
+        5: "Strongly Agree",
+    }
+    results = []
+
+    for col in likert_cols:
+        series = pd.to_numeric(df[col], errors="coerce").dropna()
+        total = len(series)
+        if total == 0:
+            continue
+        for score in [1, 2, 3, 4, 5]:
+            count = int((series == score).sum())
+            results.append({
+                "Likert Variable": col,
+                "Likert Value": score,
+                "Response Label": labels[score],
+                "Frequency": count,
+                "Percentage": round((count / total) * 100, 2),
+                "Valid responses": total,
+            })
+
+    return pd.DataFrame(results)
+
+
+def likert_full_distribution_by_group(df, likert_cols, group_col):
+    """Show full Likert distribution by selected grouping/category variable."""
+    if group_col is None or group_col not in df.columns or not likert_cols:
+        return pd.DataFrame()
+
+    labels = {
+        1: "Strongly Disagree",
+        2: "Disagree",
+        3: "Neutral",
+        4: "Agree",
+        5: "Strongly Agree",
+    }
+    results = []
+
+    temp = df.copy()
+    temp[group_col] = temp[group_col].fillna("Missing").astype(str)
+
+    for group, gdf in temp.groupby(group_col):
+        for col in likert_cols:
+            series = pd.to_numeric(gdf[col], errors="coerce").dropna()
+            total = len(series)
+            if total == 0:
+                continue
+            for score in [1, 2, 3, 4, 5]:
+                count = int((series == score).sum())
+                results.append({
+                    "Grouping Variable": group_col,
+                    "Group / Category": group,
+                    "Likert Variable": col,
+                    "Likert Value": score,
+                    "Response Label": labels[score],
+                    "Frequency": count,
+                    "Percentage": round((count / total) * 100, 2),
+                    "Valid responses": total,
+                })
+
+    return pd.DataFrame(results)
+
+
 def quantitative_summary_by_group(df, numeric_cols, group_col):
     """Mean/average quantitative analysis by gender or selected categorical group."""
     if group_col is None or group_col not in df.columns or not numeric_cols:
@@ -787,6 +860,24 @@ def show_figures_grid(image_paths, columns_per_row=4):
                 st.image(str(path), use_container_width=True)
 
 
+
+def display_variable_tables(table_df, variable_col, title_prefix=""):
+    """Display one separate table per variable for reader-friendly review."""
+    if table_df is None or table_df.empty:
+        st.info("No data available for this analysis.")
+        return
+    if variable_col not in table_df.columns:
+        st.dataframe(table_df, use_container_width=True)
+        return
+
+    variables = table_df[variable_col].dropna().astype(str).unique().tolist()
+    for variable in variables:
+        subset = table_df[table_df[variable_col].astype(str) == variable].copy()
+        label = f"{title_prefix}{variable}" if title_prefix else variable
+        with st.expander(label, expanded=False):
+            st.dataframe(subset, use_container_width=True)
+
+
 def save_corr_heatmap(corr: pd.DataFrame, outpath: Path):
     fig, ax = plt.subplots(figsize=(9, 6))
     sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", center=0, ax=ax)
@@ -822,6 +913,97 @@ def save_path_diagram(paths: pd.DataFrame, outpath: Path):
     fig.savefig(outpath, dpi=300)
     plt.close(fig)
 
+
+
+
+def build_professional_summary_text(df, quant_summary, categorical_freq, likert_summary, likert_distribution, yes_no_results, gender_comparison):
+    """Create a professional, reviewer-friendly automated summary and recommendations."""
+    lines = []
+    lines.append("# Automated Professional Summary Report")
+    lines.append("")
+    lines.append("## Executive Summary")
+    lines.append(
+        f"The uploaded dataset includes {df.shape[0]:,} respondent records and {df.shape[1]:,} variables. "
+        "The dashboard produced descriptive, disaggregated, and SEM-ready outputs to support evidence review, program learning, and decision-making."
+    )
+
+    if not quant_summary.empty:
+        lines.append("")
+        lines.append("## Quantitative Profile")
+        top_quant = quant_summary.sort_values("Valid responses", ascending=False).head(5)
+        for _, row in top_quant.iterrows():
+            lines.append(
+                f"- {row['Variable']}: average/mean = {row['Mean / Average']}, median = {row['Median']}, "
+                f"based on {int(row['Valid responses']):,} valid responses."
+            )
+
+    if not likert_summary.empty:
+        lines.append("")
+        lines.append("## Key Likert-Scale Findings")
+        top_likert = likert_summary.sort_values("Percentage Agree or Above", ascending=False).head(5)
+        for _, row in top_likert.iterrows():
+            lines.append(
+                f"- {row['Variable']}: {row['Percentage Agree or Above']}% of respondents selected Agree or Strongly Agree."
+            )
+
+    if not yes_no_results.empty:
+        lines.append("")
+        lines.append("## Key Yes/No Findings")
+        top_yes = yes_no_results.sort_values("Percentage Yes", ascending=False).head(5)
+        for _, row in top_yes.iterrows():
+            lines.append(f"- {row['Variable']}: {row['Percentage Yes']}% answered Yes.")
+
+    if not gender_comparison.empty:
+        lines.append("")
+        lines.append("## Gender-Disaggregated Findings")
+        sig = gender_comparison[gender_comparison["Significance Level"].astype(str).str.contains("Significant|Highly", case=False, na=False)]
+        if sig.empty:
+            lines.append("- Men/Women comparison tables were generated. No statistically significant differences were detected at the 5% level among the tested quantitative variables.")
+        else:
+            for _, row in sig.head(5).iterrows():
+                lines.append(
+                    f"- {row['Variable / Indicator']}: Men mean = {row['Men: average / mean']}, "
+                    f"Women mean = {row['Women: average / mean']}, Difference = {row['Difference (Men - Women)']}, "
+                    f"p-value = {row['p-value']} ({row['Significance Level']})."
+                )
+
+    lines.append("")
+    lines.append("## Recommended Interpretation for Reviewers")
+    lines.append("- Focus first on variables with high agreement, high Yes responses, or statistically meaningful group differences.")
+    lines.append("- Interpret p-values together with sample size, missing data, measurement quality, and program theory.")
+    lines.append("- Use gender-disaggregated findings to identify whether barriers, confidence, costs, or outcomes differ between Men and Women.")
+    lines.append("- Use optional category analysis for variables such as city, education, employment status, region, or country of origin to identify where support needs are concentrated.")
+
+    lines.append("")
+    lines.append("## Suggested Recommendations")
+    lines.append("1. Prioritize the highest-ranked barriers in program design, referral pathways, and mentorship support.")
+    lines.append("2. Use gender-disaggregated differences to design targeted supports where Men and Women experience different levels of cost, confidence, barriers, or outcomes.")
+    lines.append("3. Review city/category-level patterns to target local partnerships, employer engagement, credential-navigation supports, and settlement services.")
+    lines.append("4. Strengthen data quality by reviewing variables with low valid response counts, high missingness, or unclear coding before final reporting.")
+    lines.append("5. Combine descriptive findings with SEM pathways to move from simple reporting to explanation of how barriers affect employment transition outcomes.")
+
+    return "\n".join(lines)
+
+
+def save_professional_summary_docx(summary_text, outpath: Path):
+    """Save professional automated summary as a Word document."""
+    doc = Document()
+    for line in summary_text.split("\n"):
+        clean = line.strip()
+        if not clean:
+            doc.add_paragraph("")
+        elif clean.startswith("# "):
+            doc.add_heading(clean.replace("# ", ""), level=0)
+        elif clean.startswith("## "):
+            doc.add_heading(clean.replace("## ", ""), level=1)
+        elif clean.startswith("- "):
+            doc.add_paragraph(clean.replace("- ", ""), style="List Bullet")
+        elif re.match(r"^\d+\.\s", clean):
+            doc.add_paragraph(re.sub(r"^\d+\.\s", "", clean), style="List Number")
+        else:
+            doc.add_paragraph(clean)
+    doc.save(outpath)
+    return outpath
 
 # -------------------------------------------------------------------
 # Word report
@@ -966,11 +1148,13 @@ quant_summary = quantitative_summary(df, numeric_cols)
 categorical_freq = categorical_frequency_summary(df, categorical_cols)
 likert_summary = likert_agree_summary(df, likert_cols)
 yes_no_results = yes_no_summary(df, yes_no_cols)
+likert_distribution = likert_full_distribution(df, likert_cols)
 
 # Gender-disaggregated summaries: Men and Women only
 gender_quant = quantitative_summary_by_group(df_gender, numeric_cols, gender_group_col)
 gender_quant_comparison = quantitative_gender_comparison_table(df_gender, numeric_cols, gender_group_col)
 gender_likert = likert_summary_by_group(df_gender, likert_cols, gender_group_col)
+gender_likert_distribution = likert_full_distribution_by_group(df_gender, likert_cols, gender_group_col)
 gender_yes_no = yes_no_summary_by_group(df_gender, yes_no_cols, gender_group_col)
 gender_categorical = categorical_frequency_by_group(df_gender, categorical_cols, gender_group_col)
 
@@ -980,6 +1164,7 @@ for group_col in selected_group_vars:
     optional_group_tables[f"{group_col}_quantitative"] = quantitative_by_category_comparison(df, numeric_cols, group_col)
     optional_group_tables[f"{group_col}_categorical_proportions"] = categorical_proportion_by_category(df, categorical_cols, group_col)
     optional_group_tables[f"{group_col}_likert"] = likert_summary_by_group(df, likert_cols, group_col)
+    optional_group_tables[f"{group_col}_likert_full_distribution"] = likert_full_distribution_by_group(df, likert_cols, group_col)
     optional_group_tables[f"{group_col}_yes_no"] = yes_no_summary_by_group(df, yes_no_cols, group_col)
     optional_group_tables[f"{group_col}_categorical"] = categorical_frequency_by_group(df, categorical_cols, group_col)
 
@@ -1013,10 +1198,12 @@ all_tables = {
     "quantitative_summary": quant_summary,
     "categorical_frequency": categorical_freq,
     "likert_agree_summary": likert_summary,
+    "likert_full_distribution": likert_distribution,
     "yes_no_summary": yes_no_results,
     "gender_quantitative": gender_quant,
     "gender_quantitative_comparison": gender_quant_comparison,
     "gender_likert": gender_likert,
+    "gender_likert_full_distribution": gender_likert_distribution,
     "gender_yes_no": gender_yes_no,
     "gender_categorical": gender_categorical,
     "reliability": rel,
@@ -1058,6 +1245,18 @@ summary_insights = build_summary_insights(
     gender_comparison=gender_quant_comparison,
 )
 
+professional_summary_text = build_professional_summary_text(
+    df=df,
+    quant_summary=quant_summary,
+    categorical_freq=categorical_freq,
+    likert_summary=likert_summary,
+    likert_distribution=likert_distribution,
+    yes_no_results=yes_no_results,
+    gender_comparison=gender_quant_comparison,
+)
+professional_report_path = OUTPUT_ROOT / "model_outputs" / "professional_automated_summary_report.docx"
+save_professional_summary_docx(professional_summary_text, professional_report_path)
+
 st.markdown(
     """
     <div class="dashboard-hero">
@@ -1076,8 +1275,19 @@ metric_cols[3].metric("Categorical variables", f"{len(categorical_cols):,}")
 
 st.markdown('<div class="section-card">', unsafe_allow_html=True)
 st.markdown("#### Automated Summary Insights")
+st.caption("These automated insights help reviewers quickly identify the most important findings before reading detailed tables.")
 for insight in summary_insights:
     st.markdown(f'<div class="insight-box">{insight}</div>', unsafe_allow_html=True)
+
+with st.expander("Generate professional automated summary report and recommendations", expanded=False):
+    st.markdown("The report below is automatically drafted for professional reviewers. It summarizes findings and provides practical recommendations.")
+    st.markdown(professional_summary_text)
+    with open(professional_report_path, "rb") as f:
+        st.download_button(
+            "Download professional automated summary report",
+            f,
+            file_name="professional_automated_summary_report.docx"
+        )
 st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown("### Priority Analysis Tables")
@@ -1085,7 +1295,8 @@ priority_tabs = st.tabs([
     "Quantitative by Gender",
     "Averages for Quantitative Variables",
     "Categorical Frequencies",
-    "Likert and Yes/No Summary"
+    "Likert and Yes/No Summary",
+    "Full Likert Distribution"
 ])
 
 with priority_tabs[0]:
@@ -1115,6 +1326,11 @@ with priority_tabs[3]:
         st.markdown("#### Yes/No: Percentage Yes")
         st.dataframe(yes_no_results, use_container_width=True)
 
+with priority_tabs[4]:
+    st.markdown("#### Full Likert-scale distribution")
+    st.caption("This table preserves the Likert response values as Strongly Disagree, Disagree, Neutral, Agree, and Strongly Agree, with frequency and percentage.")
+    display_variable_tables(likert_distribution, "Likert Variable", title_prefix="Likert distribution: ")
+
 st.markdown("### Detailed Results")
 
 tabs = st.tabs([
@@ -1141,16 +1357,39 @@ with tabs[0]:
             st.markdown(f"### Analysis by {group_col}")
 
             st.markdown("#### Quantitative variables by category with comparison p-values")
-            st.dataframe(optional_group_tables.get(f"{group_col}_quantitative", pd.DataFrame()), use_container_width=True)
+            display_variable_tables(
+                optional_group_tables.get(f"{group_col}_quantitative", pd.DataFrame()),
+                "Variable / Indicator",
+                title_prefix="Quantitative variable: "
+            )
 
             st.markdown("#### Categorical proportions by category with chi-square p-values")
-            st.dataframe(optional_group_tables.get(f"{group_col}_categorical_proportions", pd.DataFrame()), use_container_width=True)
+            display_variable_tables(
+                optional_group_tables.get(f"{group_col}_categorical_proportions", pd.DataFrame()),
+                "Categorical Variable",
+                title_prefix="Categorical variable: "
+            )
 
             st.markdown("#### Likert Agreement by Category")
-            st.dataframe(optional_group_tables.get(f"{group_col}_likert", pd.DataFrame()), use_container_width=True)
+            display_variable_tables(
+                optional_group_tables.get(f"{group_col}_likert", pd.DataFrame()),
+                "Variable",
+                title_prefix="Likert agreement item: "
+            )
+
+            st.markdown("#### Full Likert Scale Distribution by Category")
+            display_variable_tables(
+                optional_group_tables.get(f"{group_col}_likert_full_distribution", pd.DataFrame()),
+                "Likert Variable",
+                title_prefix="Likert distribution item: "
+            )
 
             st.markdown("#### Yes/No Responses by Category")
-            st.dataframe(optional_group_tables.get(f"{group_col}_yes_no", pd.DataFrame()), use_container_width=True)
+            display_variable_tables(
+                optional_group_tables.get(f"{group_col}_yes_no", pd.DataFrame()),
+                "Variable",
+                title_prefix="Yes/No variable: "
+            )
 
 with tabs[1]:
     st.subheader("Reader-Friendly Visual Dashboard")
@@ -1195,6 +1434,8 @@ with tabs[4]:
         st.dataframe(gender_quant, use_container_width=True)
         st.markdown("#### Likert agreement by gender")
         st.dataframe(gender_likert, use_container_width=True)
+        st.markdown("#### Full Likert scale distribution by gender")
+        display_variable_tables(gender_likert_distribution, "Likert Variable", title_prefix="Likert distribution by gender: ")
         if fig_gender_likert.exists():
             st.image(str(fig_gender_likert), use_container_width=True)
         st.markdown("#### Yes/No responses by gender")
@@ -1229,7 +1470,7 @@ with tabs[9]:
 
 st.subheader("Download outputs")
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 
 with open(excel_path, "rb") as f:
     c1.download_button(
@@ -1257,4 +1498,11 @@ with open(scores_path, "rb") as f:
         "Download construct scores",
         f,
         file_name="construct_scores.csv"
+    )
+
+with open(professional_report_path, "rb") as f:
+    c5.download_button(
+        "Download reviewer summary",
+        f,
+        file_name="professional_automated_summary_report.docx"
     )
