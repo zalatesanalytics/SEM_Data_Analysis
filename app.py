@@ -1072,7 +1072,46 @@ def build_professional_summary_text(df, quant_summary, categorical_freq, likert_
     lines.append("5. Combine descriptive findings with SEM pathways to move from simple reporting to explanation of how barriers affect employment transition outcomes.")
 
     return "\n".join(lines)
+# Updated histogram function
+# Includes:
+# - Absolute frequencies
+# - Percentage labels
+# - Data labels on bars
 
+import matplotlib.pyplot as plt
+import numpy as np
+
+def save_quantitative_histogram(series, variable_name, outpath):
+    series = series.dropna()
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    counts, bins, patches = ax.hist(series, bins=10)
+
+    total = counts.sum()
+
+    for count, patch in zip(counts, patches):
+        if count > 0:
+            percentage = (count / total) * 100
+            x = patch.get_x() + patch.get_width() / 2
+            y = patch.get_height()
+
+            ax.text(
+                x,
+                y,
+                f"{int(count)}\\n({percentage:.1f}%)",
+                ha='center',
+                va='bottom',
+                fontsize=8
+            )
+
+    ax.set_title(f"Distribution of {variable_name}")
+    ax.set_xlabel(variable_name)
+    ax.set_ylabel("Frequency")
+
+    plt.tight_layout()
+    plt.savefig(outpath, dpi=300)
+    plt.close()
 
 def save_professional_summary_docx(summary_text, outpath: Path):
     """Save professional automated summary as a Word document."""
