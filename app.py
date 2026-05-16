@@ -86,7 +86,215 @@ st.markdown("""
 # -------------------------------------------------------------------
 # General helper functions
 # -------------------------------------------------------------------
+# -------------------------------------------------------------------
+# CLEAN READER-FRIENDLY DISTRIBUTION TABLES
+# UPDATED VERSION
+# -------------------------------------------------------------------
 
+import pandas as pd
+import streamlit as st
+
+
+# -------------------------------------------------------------------
+# FUNCTION: CLEAN DISTRIBUTION TABLE
+# -------------------------------------------------------------------
+
+def clean_distribution_table(df, column_name):
+    """
+    Create a clean frequency distribution table
+    WITHOUT repeating the variable name column.
+
+    Example output:
+    Gender | Frequency | Percentage
+    """
+
+    # Create frequency table
+    table = (
+        df[column_name]
+        .fillna("Missing")
+        .astype(str)
+        .str.strip()
+        .value_counts(dropna=False)
+        .reset_index()
+    )
+
+    # Rename columns
+    table.columns = [
+        column_name.replace("_", " ").title(),
+        "Frequency"
+    ]
+
+    # Calculate percentages
+    total = table["Frequency"].sum()
+
+    table["Percentage"] = (
+        (table["Frequency"] / total) * 100
+    ).round(1)
+
+    # Sort descending
+    table = table.sort_values(
+        by="Frequency",
+        ascending=False
+    ).reset_index(drop=True)
+
+    return table
+
+
+# -------------------------------------------------------------------
+# DISPLAY SECTION
+# -------------------------------------------------------------------
+
+st.markdown("## Participant Distribution Overview")
+
+
+# -------------------------------------------------------------------
+# GENDER DISTRIBUTION
+# -------------------------------------------------------------------
+
+if "gender" in df.columns:
+
+    st.markdown("### Distribution of Survey Participants by Gender")
+
+    gender_table = clean_distribution_table(df, "gender")
+
+    st.dataframe(
+        gender_table,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# -------------------------------------------------------------------
+# YEAR ARRIVAL DISTRIBUTION
+# -------------------------------------------------------------------
+
+if "year_arrival" in df.columns:
+
+    st.markdown("### Distribution of Survey Participants by Year of Arrival")
+
+    year_arrival_table = clean_distribution_table(df, "year_arrival")
+
+    st.dataframe(
+        year_arrival_table,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# -------------------------------------------------------------------
+# COUNTRY OF ORIGIN DISTRIBUTION
+# -------------------------------------------------------------------
+
+if "country_origin" in df.columns:
+
+    st.markdown("### Distribution of Survey Participants by Country of Origin")
+
+    country_table = clean_distribution_table(df, "country_origin")
+
+    st.dataframe(
+        country_table,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# -------------------------------------------------------------------
+# IMMIGRATION STATUS DISTRIBUTION
+# -------------------------------------------------------------------
+
+if "immigration_status" in df.columns:
+
+    st.markdown("### Distribution of Survey Participants by Immigration Status")
+
+    immigration_table = clean_distribution_table(df, "immigration_status")
+
+    st.dataframe(
+        immigration_table,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# -------------------------------------------------------------------
+# MARITAL STATUS DISTRIBUTION
+# -------------------------------------------------------------------
+
+if "marital_status" in df.columns:
+
+    st.markdown("### Distribution of Survey Participants by Marital Status")
+
+    marital_table = clean_distribution_table(df, "marital_status")
+
+    st.dataframe(
+        marital_table,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# -------------------------------------------------------------------
+# HIGHEST EDUCATION DISTRIBUTION
+# -------------------------------------------------------------------
+
+if "highest_education" in df.columns:
+
+    st.markdown("### Distribution of Survey Participants by Highest Education")
+
+    education_table = clean_distribution_table(df, "highest_education")
+
+    st.dataframe(
+        education_table,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# -------------------------------------------------------------------
+# EMPLOYMENT STATUS DISTRIBUTION
+# -------------------------------------------------------------------
+
+if "employment_status" in df.columns:
+
+    st.markdown("### Distribution of Survey Participants by Employment Status")
+
+    employment_table = clean_distribution_table(df, "employment_status")
+
+    st.dataframe(
+        employment_table,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# -------------------------------------------------------------------
+# OPTIONAL: AUTOMATIC LOOP FOR OTHER VARIABLES
+# -------------------------------------------------------------------
+
+additional_distribution_vars = [
+    "province",
+    "city",
+    "language",
+    "housing_status",
+    "income_group"
+]
+
+for var in additional_distribution_vars:
+
+    if var in df.columns:
+
+        title = var.replace("_", " ").title()
+
+        st.markdown(
+            f"### Distribution of Survey Participants by {title}"
+        )
+
+        temp_table = clean_distribution_table(df, var)
+
+        st.dataframe(
+            temp_table,
+            use_container_width=True,
+            hide_index=True
+        )
 def safe_filename(name: str) -> str:
     """Convert any variable name into a safe file name."""
     return re.sub(r"[^A-Za-z0-9_]+", "_", str(name))[:80]
