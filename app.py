@@ -92,6 +92,82 @@ def safe_filename(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]+", "_", str(name))[:80]
 
 
+def pretty_label(name: str) -> str:
+    """Create a reader-friendly variable label for dashboard titles and tables."""
+    label_map = {
+        "gender": "Gender",
+        "sex": "Gender",
+        "gender_group": "Gender",
+        "year_arrival": "Year of Arrival",
+        "arrival_year": "Year of Arrival",
+        "year_of_arrival": "Year of Arrival",
+        "country_origin": "Country of Origin",
+        "country_of_origin": "Country of Origin",
+        "immigration_status": "Immigration Status",
+        "immigration_status_us": "Immigration Status",
+        "marital_status": "Marital Status",
+        "highest_education": "Highest Education",
+        "highest_education_level": "Highest Education",
+        "employment_status": "Employment Status",
+        "employment_status_us": "Employment Status",
+    }
+    key = str(name).strip().lower()
+    return label_map.get(key, str(name).replace("_", " ").title())
+
+
+def find_column_by_aliases(df, aliases):
+    """Find a column using common aliases after normalization."""
+    lower_map = {str(col).lower().strip(): col for col in df.columns}
+    for alias in aliases:
+        if alias.lower().strip() in lower_map:
+            return lower_map[alias.lower().strip()]
+    for col in df.columns:
+        compact = str(col).lower().replace("_", "").replace(" ", "")
+        for alias in aliases:
+            alias_compact = alias.lower().replace("_", "").replace(" ", "")
+            if compact == alias_compact:
+                return col
+    return None
+
+
+def variable_distribution_table(df, col):
+    """Create a clean distribution table without repeating a Variable column."""
+    if col is None or col not in df.columns:
+        return pd.DataFrame()
+
+    display_col = pretty_label(col)
+    counts = df[col].fillna("Missing").astype(str).value_counts(dropna=False)
+    total = counts.sum()
+
+    return pd.DataFrame({
+        display_col: counts.index,
+        "Frequency": counts.values.astype(int),
+        "Percentage": ((counts.values / total) * 100).round(2) if total else 0,
+    })
+
+
+def build_key_distribution_tables(df, gender_col=None):
+    """Build clean distribution tables for key participant profile variables."""
+    key_specs = {
+        "Gender": ["gender", "sex", "respondent_gender", "participant_gender", "gender_identity"],
+        "Year of Arrival": ["year_arrival", "arrival_year", "year_of_arrival", "year_arrived", "arrival"],
+        "Country of Origin": ["country_origin", "country_of_origin", "origin_country", "country"],
+        "Immigration Status": ["immigration_status", "immigration_stat_us", "immigration_status_us", "immigration_stat", "status"],
+        "Marital Status": ["marital_status", "marital"],
+        "Highest Education": ["highest_education", "highest_educatio_n", "highest_education_level", "education", "education_level"],
+        "Employment Status": ["employment_status", "employment_stat_us", "employment_status_us", "employment_stat", "employment"],
+    }
+
+    tables = {}
+    used_cols = set()
+    for title, aliases in key_specs.items():
+        col = gender_col if title == "Gender" and gender_col in df.columns else find_column_by_aliases(df, aliases)
+        if col is not None and col not in used_cols:
+            tables[title] = {"column": col, "table": variable_distribution_table(df, col)}
+            used_cols.add(col)
+    return tables
+
+
 def add_docx_table(doc, df: pd.DataFrame):
     """Add a pandas DataFrame to a Word document."""
     if df is None or df.empty:
@@ -697,16 +773,8 @@ def quantitative_by_category_wide(df, numeric_cols, group_col):
 
 
 def categorical_distribution_wide(df, group_col):
-    """Frequency and percentage distribution for one categorical variable."""
-    if group_col is None or group_col not in df.columns:
-        return pd.DataFrame()
-    counts = df[group_col].fillna("Missing").astype(str).value_counts(dropna=False)
-    total = counts.sum()
-    return pd.DataFrame({
-        "Category": counts.index,
-        "Frequency": counts.values.astype(int),
-        "Percentage": ((counts.values / total) * 100).round(2) if total else 0,
-    })
+    """Frequency and percentage distribution for one categorical variable without repeating variable names."""
+    return variable_distribution_table(df, group_col)
 
 
 def top_summary_insights(quant_summary, likert_summary, yes_no_results, gender_comparison):
@@ -958,10 +1026,16 @@ def create_word_report(tables, figures, outpath: Path):
     doc.add_heading("2.1 Quantitative Variables: Averages and Distribution", level=2)
     add_docx_table(doc, tables["quantitative_summary"].head(40))
 
-    doc.add_heading("2.2 Categorical Variables: Frequency Distribution", level=2)
+    doc.add_heading("2.2 Participant Profile Distributions", level=2)
+    for key, value in tables.get("_key_distribution_tables", {}).items():
+        doc.add_heading(f"Distribution of Survey Participants by {key}", level=3)
+        add_docx_table(doc, value["table"])
+
+    doc.add_heading("2.3 Full Categorical Frequency Distribution", level=2)
+    doc.add_paragraph("The dashboard presents category-specific tables to avoid repeating the variable name in every row.")
     add_docx_table(doc, tables["categorical_frequency"].head(60))
 
-    doc.add_heading("2.3 Likert-Scale Agree or Above Analysis", level=2)
+    doc.add_heading("2.4 Likert-Scale Agree or Above Analysis", level=2)
     add_docx_table(doc, tables["likert_agree_summary"].head(40))
 
     if figures.get("likert_bar") and figures["likert_bar"].exists():
@@ -1077,6 +1151,7 @@ _, sem_estimates, sem_fit = semopy_model(scores)
 # New descriptive summaries
 quant_summary = quantitative_summary(df, numeric_cols)
 categorical_freq = categorical_frequency_summary(df, categorical_cols)
+key_distribution_tables = build_key_distribution_tables(df, gender_col=gender_col)
 likert_summary = likert_agree_summary(df, likert_cols)
 yes_no_results = yes_no_summary(df, yes_no_cols)
 
@@ -1152,6 +1227,12 @@ all_tables = {
     "sem_fit": sem_fit,
 }
 
+# Add clean participant distribution tables to the Excel workbook.
+# Each table has only: category name, Frequency, and Percentage.
+for dist_title, dist_info in key_distribution_tables.items():
+    sheet_name = f"distribution_{safe_filename(dist_title).lower()}"
+    all_tables[sheet_name] = dist_info["table"]
+
 # Add optional selected group analysis into Excel workbook
 all_tables.update(optional_group_tables)
 
@@ -1159,8 +1240,10 @@ excel_path = OUTPUT_ROOT / "tables" / "emerge_sem_results.xlsx"
 write_excel(all_tables, excel_path)
 
 report_path = OUTPUT_ROOT / "model_outputs" / "emerge_sem_report.docx"
+report_tables = dict(all_tables)
+report_tables["_key_distribution_tables"] = key_distribution_tables
 create_word_report(
-    all_tables,
+    report_tables,
     {
         "correlation": fig_corr,
         "paths": fig_paths,
@@ -1223,8 +1306,13 @@ with c_top1:
     st.markdown("#### Quantitative Averages")
     st.dataframe(quant_summary[["Variable", "Valid responses", "Mean / Average", "Median", "Minimum", "Maximum"]].head(12), use_container_width=True)
 with c_top2:
-    st.markdown("#### Categorical Frequency Distribution")
-    st.dataframe(categorical_freq.head(20), use_container_width=True)
+    st.markdown("#### Participant Profile Distribution")
+    if key_distribution_tables:
+        first_title, first_info = next(iter(key_distribution_tables.items()))
+        st.caption(f"Distribution of survey participants by {first_title}")
+        st.dataframe(first_info["table"], use_container_width=True)
+    else:
+        st.info("No participant profile distribution variables detected.")
 
 st.markdown("### Dashboard Details")
 
