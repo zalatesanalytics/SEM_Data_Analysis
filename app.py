@@ -109,6 +109,8 @@ def pretty_label(name: str) -> str:
         "highest_education_level": "Highest Education",
         "employment_status": "Employment Status",
         "employment_status_us": "Employment Status",
+        "annual_income_numeric": "Annual Income",
+        "annual_income": "Annual Income",
     }
     key = str(name).strip().lower()
     return label_map.get(key, str(name).replace("_", " ").title())
@@ -320,6 +322,103 @@ def find_column_by_candidates(df, candidates):
                 return original
 
     return None
+
+
+
+def income_band_to_numeric(value):
+    """
+    Convert annual income bands such as 25_49k, 50_74k, 75_99k, 100k_plus
+    into approximate numeric annual income midpoints.
+
+    This keeps the original annual_income column unchanged and creates
+    an analysis-ready numeric version for descriptives, gender comparison,
+    cost-of-stalling, charts, and SEM/correlation-ready summaries.
+    """
+    if pd.isna(value):
+        return pd.NA
+
+    text = str(value).strip().lower()
+    text = text.replace("$", "").replace(",", "").replace(" ", "")
+    text = text.replace("-", "_").replace("to", "_")
+
+    mapping = {
+        "0_24k": 12000,
+        "under_25k": 12000,
+        "less_than_25k": 12000,
+        "<25k": 12000,
+        "25_49k": 37000,
+        "25k_49k": 37000,
+        "25_50k": 37500,
+        "50_74k": 62000,
+        "50k_74k": 62000,
+        "50_75k": 62500,
+        "75_99k": 87000,
+        "75k_99k": 87000,
+        "75_100k": 87500,
+        "100k_plus": 110000,
+        "100k+": 110000,
+        "100_plus": 110000,
+        "over_100k": 110000,
+        ">100k": 110000,
+        "prefer_not": pd.NA,
+        "prefer_not_to_say": pd.NA,
+        "dont_know": pd.NA,
+        "missing": pd.NA,
+        "nan": pd.NA,
+    }
+
+    if text in mapping:
+        return mapping[text]
+
+    # If already numeric, keep it.
+    numeric = pd.to_numeric(text, errors="coerce")
+    if pd.notna(numeric):
+        # Treat small values like 50 or 75 as thousands if needed.
+        return numeric * 1000 if numeric < 1000 else numeric
+
+    # Flexible pattern: 25_49k, 25k_49k, etc.
+    nums = re.findall(r"\d+", text)
+    if len(nums) >= 2:
+        low = float(nums[0])
+        high = float(nums[1])
+        midpoint = (low + high) / 2
+        return midpoint * 1000 if "k" in text or midpoint < 1000 else midpoint
+
+    if len(nums) == 1 and ("plus" in text or "+" in text or "over" in text or ">" in text):
+        val = float(nums[0])
+        return val * 1000 if "k" in text or val < 1000 else val
+
+    return pd.NA
+
+
+def add_income_numeric_columns(df):
+    """
+    Add numeric income columns when income is stored as categories.
+    This fixes cases where annual_income exists but does not appear in quantitative analysis
+    because values are text bands such as 25_49k or 100k_plus.
+    """
+    df = df.copy()
+
+    income_candidates = [
+        "annual_income",
+        "income",
+        "current_income",
+        "household_income",
+        "personal_income",
+        "employment_income"
+    ]
+
+    for col in income_candidates:
+        if col in df.columns:
+            numeric_col = f"{col}_numeric"
+            converted = df[col].apply(income_band_to_numeric)
+            converted = pd.to_numeric(converted, errors="coerce")
+
+            # Only add when conversion produces usable values.
+            if converted.notna().sum() > 0:
+                df[numeric_col] = converted
+
+    return df
 
 
 def key_dataset_statistics(df):
@@ -911,8 +1010,8 @@ def cost_of_stalling_analysis(df):
     flag_col = "stalled_employment_transition"
 
     income_col = detect_first_column(work_df, [
-        "monthly_income", "income", "current_income", "household_income", "personal_income",
-        "employment_income", "annual_income", "income_monthly"
+        "annual_income_numeric", "annual_income", "monthly_income", "income", "current_income", "household_income", "personal_income",
+        "employment_income", "income_monthly"
     ])
     expected_income_col = detect_first_column(work_df, [
         "expected_income", "expected_monthly_income", "target_income", "previous_income",
@@ -1325,6 +1424,8 @@ if not uploaded:
 raw = load_data(uploaded)
 df = normalize_columns(raw)
 df = coerce_analysis_columns(df)
+# Convert income bands such as 25_49k and 100k_plus into numeric annual income values for analysis.
+df = add_income_numeric_columns(df)
 
 # Variable mapping is calculated early but displayed below the key findings.
 mapping = variable_mapping(df)
