@@ -821,6 +821,192 @@ def top_summary_insights(quant_summary, likert_summary, yes_no_results, gender_c
         insights.append(f"Gender comparison: {len(sig):,} quantitative variables show statistically significant Men/Women differences.")
     return insights
 
+
+# -------------------------------------------------------------------
+# Research question and cost-of-stalling analysis functions
+# -------------------------------------------------------------------
+
+def detect_first_column(df, candidates):
+    """Find the first matching column from a list of possible aliases."""
+    return find_column_by_candidates(df, candidates)
+
+
+def contains_any(series, keywords):
+    """Case-insensitive keyword match for categorical text."""
+    s = series.fillna("").astype(str).str.lower()
+    pattern = "|".join([re.escape(k.lower()) for k in keywords])
+    return s.str.contains(pattern, regex=True, na=False)
+
+
+def build_analysis_request_mapping(df, available_tables):
+    """Map the requested analysis questions to current dashboard outputs."""
+    checks = [
+        ("Data readiness", "Number of observations, rows, columns, duplicates, and missing values", "key_statistics"),
+        ("Participant profile", "Gender, year arrival, country origin, immigration status, marital status, education, employment status", "priority_distributions"),
+        ("Quantitative descriptives", "Mean, median, minimum, maximum, standard deviation for all quantitative variables", "quantitative_summary"),
+        ("Categorical distributions", "Frequency and percentage tables without repeated Variable column", "categorical_frequency"),
+        ("Gender analysis", "Men/Women quantitative comparison with difference and p-value", "gender_quantitative_comparison"),
+        ("Likert barriers", "Percent Agree or Strongly Agree for barrier variables", "likert_agree_summary"),
+        ("Yes/No indicators", "Percent Yes for binary variables", "yes_no_summary"),
+        ("SEM model", "Reliability, correlations, path coefficients, mediation, and SEM fit", "sem_estimates"),
+        ("Cost of stalling", "Financial and social cost of stalled employment transition", "cost_of_stalling"),
+        ("Research question alignment", "Mapping of requested questions to outputs", "research_question_mapping"),
+    ]
+    rows = []
+    for area, requirement, table_key in checks:
+        present = table_key in available_tables and available_tables.get(table_key) is not None and not available_tables.get(table_key, pd.DataFrame()).empty
+        rows.append({
+            "Analysis area": area,
+            "Requirement from analysis request": requirement,
+            "Provided by revised script": "Yes" if present else "Partial / depends on available variables",
+            "Output location": table_key,
+        })
+    return pd.DataFrame(rows)
+
+
+def identify_employment_stalling(df):
+    """Create a flexible stalled-employment flag using available employment/job-search variables."""
+    result = df.copy()
+    employment_col = detect_first_column(result, [
+        "employment_status", "employment_stat_us", "employment_stat", "current_employment_status",
+        "work_status", "employment"
+    ])
+    months_col = detect_first_column(result, [
+        "months_job_search", "job_search_months", "months_looking_for_work", "months_unemployed",
+        "time_to_employment_months", "months_without_professional_job"
+    ])
+    underemployment_col = detect_first_column(result, [
+        "underemployed", "underemployment", "working_below_skill", "job_below_qualification",
+        "survival_job", "below_skill_level"
+    ])
+
+    stalled = pd.Series(False, index=result.index)
+    evidence = []
+
+    if employment_col:
+        stalled_keywords = [
+            "unemployed", "not employed", "looking", "job seeking", "seeking", "underemployed",
+            "survival", "temporary", "part-time", "part time", "casual", "contract", "precarious"
+        ]
+        stalled = stalled | contains_any(result[employment_col], stalled_keywords)
+        evidence.append(f"employment status column: {employment_col}")
+
+    if months_col:
+        months = pd.to_numeric(result[months_col], errors="coerce")
+        stalled = stalled | (months >= 6)
+        evidence.append(f"job-search duration >= 6 months: {months_col}")
+
+    if underemployment_col:
+        yes_values = {"yes", "1", "true", "underemployed", "below qualification", "below skill", "survival job"}
+        stalled = stalled | result[underemployment_col].fillna("").astype(str).str.lower().str.strip().isin(yes_values)
+        evidence.append(f"underemployment column: {underemployment_col}")
+
+    result["stalled_employment_transition"] = stalled.map({True: "Stalled", False: "Not stalled / not flagged"})
+    return result, evidence
+
+
+def cost_of_stalling_analysis(df):
+    """Estimate cost of stalled employment transition using all available financial/social-cost variables."""
+    work_df, evidence = identify_employment_stalling(df)
+    flag_col = "stalled_employment_transition"
+
+    income_col = detect_first_column(work_df, [
+        "monthly_income", "income", "current_income", "household_income", "personal_income",
+        "employment_income", "annual_income", "income_monthly"
+    ])
+    expected_income_col = detect_first_column(work_df, [
+        "expected_income", "expected_monthly_income", "target_income", "previous_income",
+        "pre_arrival_income", "income_before_arrival", "professional_income_before_arrival"
+    ])
+    expense_col = detect_first_column(work_df, [
+        "monthly_expenses", "expenses", "living_expenses", "household_expenses", "rent_burden",
+        "monthly_cost", "cost_of_living"
+    ])
+    debt_col = detect_first_column(work_df, ["debt", "monthly_debt", "loan", "financial_debt"])
+    stress_col = detect_first_column(work_df, ["financial_stress", "stress", "burnout", "mental_stress", "economic_stress"])
+
+    numeric_cost_cols = [c for c in [income_col, expected_income_col, expense_col, debt_col, stress_col] if c]
+    for c in numeric_cost_cols:
+        work_df[c] = pd.to_numeric(work_df[c], errors="coerce")
+
+    if income_col and expense_col:
+        work_df["monthly_surplus_deficit"] = work_df[income_col] - work_df[expense_col]
+        numeric_cost_cols.append("monthly_surplus_deficit")
+
+    if income_col and expected_income_col:
+        work_df["estimated_monthly_opportunity_cost"] = work_df[expected_income_col] - work_df[income_col]
+        numeric_cost_cols.append("estimated_monthly_opportunity_cost")
+
+    summary_rows = []
+    for group, gdf in work_df.groupby(flag_col):
+        row = {"Employment transition status": group, "Respondents": len(gdf)}
+        for col in numeric_cost_cols:
+            vals = pd.to_numeric(gdf[col], errors="coerce").dropna()
+            row[f"{pretty_label(col)} mean"] = round(vals.mean(), 2) if len(vals) else "N/A"
+            row[f"{pretty_label(col)} median"] = round(vals.median(), 2) if len(vals) else "N/A"
+        summary_rows.append(row)
+
+    summary = pd.DataFrame(summary_rows)
+
+    comparison_rows = []
+    for col in numeric_cost_cols:
+        stalled_vals = pd.to_numeric(work_df.loc[work_df[flag_col] == "Stalled", col], errors="coerce").dropna()
+        not_vals = pd.to_numeric(work_df.loc[work_df[flag_col] == "Not stalled / not flagged", col], errors="coerce").dropna()
+        p_value = pd.NA
+        if stats is not None and len(stalled_vals) >= 2 and len(not_vals) >= 2:
+            try:
+                _, p_value = stats.ttest_ind(stalled_vals, not_vals, equal_var=False, nan_policy="omit")
+            except Exception:
+                p_value = pd.NA
+        comparison_rows.append({
+            "Cost indicator": pretty_label(col),
+            "Stalled mean": round(stalled_vals.mean(), 2) if len(stalled_vals) else "N/A",
+            "Not stalled mean": round(not_vals.mean(), 2) if len(not_vals) else "N/A",
+            "Difference": round(stalled_vals.mean() - not_vals.mean(), 2) if len(stalled_vals) and len(not_vals) else "N/A",
+            "p-value": format_p_value(p_value),
+            "Interpretation": significance_label(p_value),
+            "Stalled n": int(len(stalled_vals)),
+            "Not stalled n": int(len(not_vals)),
+        })
+    comparison = pd.DataFrame(comparison_rows)
+
+    flag_distribution = variable_distribution_table(work_df, flag_col)
+    metadata = pd.DataFrame({
+        "Item": ["Stalling definition evidence", "Income variable", "Expected / previous income variable", "Expense variable", "Debt variable", "Stress variable"],
+        "Detected value": ["; ".join(evidence) if evidence else "No direct stalling variable detected; flag defaults to employment/job-search proxies only where available", income_col or "Not detected", expected_income_col or "Not detected", expense_col or "Not detected", debt_col or "Not detected", stress_col or "Not detected"]
+    })
+    return work_df, summary, comparison, flag_distribution, metadata
+
+
+def barrier_construct_alignment(df):
+    """Create an analysis table for common stalled-employment barriers using available columns."""
+    barrier_specs = {
+        "Credential recognition barrier": ["credential_recognition", "cred_recognition", "cred_req_difficulty", "credential_difficulty", "foreign_credential"],
+        "Canadian experience barrier": ["canadian_experience", "lack_canadian_experience", "canadian_exp_barrier", "canadian_work_experience"],
+        "Discrimination in hiring": ["disc_hiring", "discrimination", "hiring_discrimination", "workplace_discrimination"],
+        "Language barrier": ["language_barrier", "english_barrier", "french_barrier", "language_difficulty"],
+        "Professional network barrier": ["professional_contacts", "networking", "social_capital", "professional_network"],
+        "Financial pressure": ["financial_stress", "financial_pressure", "rent_burden", "cost_of_living"],
+        "Mental wellbeing pressure": ["burnout", "stress", "mental_health", "wellbeing"],
+    }
+    rows = []
+    for barrier, aliases in barrier_specs.items():
+        col = detect_first_column(df, aliases)
+        if col is None:
+            rows.append({"Barrier / construct": barrier, "Detected column": "Not detected", "Analysis produced": "No", "Key statistic": "N/A"})
+            continue
+        ser_num = pd.to_numeric(df[col], errors="coerce")
+        if ser_num.notna().sum() > 0 and ser_num.dropna().between(1, 5).all():
+            valid = ser_num.dropna()
+            agree = (valid >= 4).sum()
+            stat_text = f"{round((agree / len(valid)) * 100, 2)}% agree/strongly agree"
+        else:
+            vals = df[col].fillna("Missing").astype(str).str.lower().str.strip()
+            yes = vals.isin(["yes", "1", "true", "agree", "strongly agree"]).sum()
+            stat_text = f"{round((yes / len(vals)) * 100, 2)}% yes/positive" if len(vals) else "N/A"
+        rows.append({"Barrier / construct": barrier, "Detected column": col, "Analysis produced": "Yes", "Key statistic": stat_text})
+    return pd.DataFrame(rows)
+
 # -------------------------------------------------------------------
 # Visualization functions
 # -------------------------------------------------------------------
@@ -1194,6 +1380,10 @@ missing_summary = missing_values_summary(df)
 priority_tables, detected_priority_columns = priority_distribution_tables(df, gender_col=gender_col)
 priority_distribution_summary = combine_priority_distributions(priority_tables)
 
+# Research-question alignment and cost-of-stalling analysis
+stalling_df, cost_summary, cost_comparison, stalling_distribution, cost_metadata = cost_of_stalling_analysis(df)
+barrier_alignment = barrier_construct_alignment(df)
+
 # Optional categorical disaggregation selected by client/user
 optional_group_tables = {}
 for group_col in selected_group_vars:
@@ -1236,6 +1426,11 @@ all_tables = {
     "key_statistics": key_stats_table,
     "missing_values_summary": missing_summary,
     "priority_distributions": priority_distribution_summary,
+    "cost_of_stalling": cost_summary,
+    "cost_of_stalling_comparison": cost_comparison,
+    "stalling_distribution": stalling_distribution,
+    "cost_of_stalling_metadata": cost_metadata,
+    "barrier_construct_alignment": barrier_alignment,
     "categorical_frequency": categorical_freq,
     "likert_agree_summary": likert_summary,
     "yes_no_summary": yes_no_results,
@@ -1252,6 +1447,9 @@ all_tables = {
     "sem_estimates": sem_estimates,
     "sem_fit": sem_fit,
 }
+
+research_question_mapping = build_analysis_request_mapping(df, all_tables)
+all_tables["research_question_mapping"] = research_question_mapping
 
 # Add clean participant distribution tables to the Excel workbook.
 # Each table has only: category name, Frequency, and Percentage.
@@ -1345,6 +1543,8 @@ st.markdown("### Dashboard Details")
 tabs = st.tabs([
     "Overview & Data Readiness",
     "Key Statistics",
+    "Request Mapping",
+    "Cost of Stalling",
     "Descriptives",
     "Categorical Frequencies",
     "Gender Analysis",
@@ -1382,7 +1582,34 @@ with tabs[1]:
     st.subheader("Priority Distribution Charts")
     show_figures_grid(priority_chart_paths, columns_per_row=4)
 
+
 with tabs[2]:
+    st.subheader("Mapping of Requested Data Analysis Questions to Dashboard Outputs")
+    st.caption("This table verifies whether the script produces each required analysis output. Items marked partial depend on whether the uploaded dataset contains the required variables.")
+    st.dataframe(research_question_mapping, use_container_width=True, hide_index=True)
+
+    st.subheader("Barrier / Construct Alignment")
+    st.caption("This checks whether key stalled-employment barriers are detected in the uploaded dataset and whether summary statistics can be produced.")
+    st.dataframe(barrier_alignment, use_container_width=True, hide_index=True)
+
+with tabs[3]:
+    st.subheader("Cost of Stalled Employment Transition")
+    st.caption("This section estimates the cost of stalled employment transition using available employment status, job-search duration, income, expenses, debt, and stress variables.")
+
+    st.markdown("#### Stalled Employment Transition Distribution")
+    st.dataframe(stalling_distribution, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Variables Detected for Cost-of-Stalling Analysis")
+    st.dataframe(cost_metadata, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Cost Summary by Employment Transition Status")
+    st.dataframe(cost_summary, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Cost Comparison: Stalled vs Not Stalled")
+    st.caption("Where numeric data are available, this table compares mean values and provides p-values using Welch t-tests.")
+    st.dataframe(cost_comparison, use_container_width=True, hide_index=True)
+
+with tabs[4]:
     st.subheader("Quantitative Variables: Average and Descriptive Statistics")
     st.caption("This table provides averages and descriptive statistics for all quantitative variables.")
     st.dataframe(quant_summary, use_container_width=True)
@@ -1390,7 +1617,7 @@ with tabs[2]:
     st.subheader("Existing Descriptive Statistics")
     st.dataframe(desc, use_container_width=True)
 
-with tabs[3]:
+with tabs[5]:
     st.subheader("Frequency Distribution for Categorical Variables")
     st.caption("Each categorical variable is shown in its own clean table. The repeated 'Variable' column has been removed from the dashboard display.")
     render_clean_categorical_tables(df, categorical_cols, max_tables=25)
@@ -1401,7 +1628,7 @@ with tabs[3]:
     st.subheader("Yes/No Response Analysis")
     st.dataframe(yes_no_results, use_container_width=True)
 
-with tabs[4]:
+with tabs[6]:
     st.subheader("Gender-Disaggregated Analysis: Men and Women Only")
 
     if gender_col is None:
@@ -1430,7 +1657,7 @@ with tabs[4]:
         st.markdown("#### Categorical Frequencies by Gender")
         st.dataframe(gender_categorical, use_container_width=True)
 
-with tabs[5]:
+with tabs[7]:
     st.subheader("Optional Disaggregated Analysis by Selected Categorical Variables")
     st.caption("Use the sidebar to choose categorical variables such as region, education, age group, country of origin, or employment status.")
 
@@ -1459,7 +1686,7 @@ with tabs[5]:
             st.markdown("#### Categorical Frequency")
             st.dataframe(optional_group_tables.get(f"{group_col}_categorical", pd.DataFrame()), use_container_width=True)
 
-with tabs[6]:
+with tabs[8]:
     st.subheader("Reader-Friendly Visual Summary")
     st.caption("Figures are shown in a compact layout with four visuals per row.")
 
@@ -1481,24 +1708,24 @@ with tabs[6]:
     main_visuals = [p for p in [fig_likert, fig_gender_likert, fig_corr, fig_paths] if p.exists()]
     show_figures_grid(main_visuals, columns_per_row=4)
 
-with tabs[7]:
+with tabs[9]:
     st.dataframe(rel, use_container_width=True)
     st.dataframe(loadings, use_container_width=True)
 
-with tabs[8]:
+with tabs[10]:
     if fig_corr.exists():
         st.image(str(fig_corr), use_container_width=True)
     st.dataframe(corr, use_container_width=True)
 
-with tabs[9]:
+with tabs[11]:
     if fig_paths.exists():
         st.image(str(fig_paths), use_container_width=True)
     st.dataframe(paths, use_container_width=True)
 
-with tabs[10]:
+with tabs[12]:
     st.dataframe(med, use_container_width=True)
 
-with tabs[11]:
+with tabs[13]:
     st.dataframe(sem_estimates, use_container_width=True)
     st.dataframe(sem_fit, use_container_width=True)
 
