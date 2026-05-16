@@ -59,6 +59,26 @@ st.markdown("""
     margin: 0.5rem 0 1rem 0;
 }
 .small-caption {font-size: 0.85rem; color: #5f6b7a;}
+.hero-card {
+    background: linear-gradient(135deg, #0f766e 0%, #134e4a 100%);
+    color: white;
+    border-radius: 20px;
+    padding: 1.2rem 1.4rem;
+    box-shadow: 0 8px 22px rgba(15, 118, 110, 0.22);
+    margin-bottom: 1rem;
+}
+.hero-card h2 {margin: 0; color: white;}
+.hero-card p {margin: 0.35rem 0 0 0; color: #e6fffb;}
+.stat-strip {
+    background: #ffffff;
+    border: 1px solid #e5eef5;
+    border-radius: 14px;
+    padding: 0.85rem 1rem;
+    box-shadow: 0 3px 12px rgba(15, 23, 42, 0.06);
+    margin-bottom: 0.75rem;
+}
+.stat-strip b {color: #0f766e;}
+.dashboard-divider {height: 1px; background: #e5e7eb; margin: 1rem 0;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -199,6 +219,157 @@ def standardize_gender_for_men_women(df, gender_col):
     df_gender = df_gender[df_gender["gender_group"].isin(["Men", "Women"])].copy()
 
     return df_gender, "gender_group"
+
+
+
+
+def find_column_by_candidates(df, candidates):
+    """Find a column using expected names, allowing minor case/spacing differences."""
+    if df is None or df.empty:
+        return None
+
+    normalized_map = {
+        re.sub(r"[^a-z0-9]+", "_", str(col).strip().lower()).strip("_"): col
+        for col in df.columns
+    }
+
+    for candidate in candidates:
+        key = re.sub(r"[^a-z0-9]+", "_", str(candidate).strip().lower()).strip("_")
+        if key in normalized_map:
+            return normalized_map[key]
+
+    for key, original in normalized_map.items():
+        for candidate in candidates:
+            cand_key = re.sub(r"[^a-z0-9]+", "_", str(candidate).strip().lower()).strip("_")
+            if cand_key and (cand_key in key or key in cand_key):
+                return original
+
+    return None
+
+
+def key_dataset_statistics(df):
+    """Create high-level data readiness statistics for the home page."""
+    total_cells = int(df.shape[0] * df.shape[1]) if df is not None else 0
+    missing_cells = int(df.isna().sum().sum()) if df is not None else 0
+    missing_pct = round((missing_cells / total_cells) * 100, 2) if total_cells else 0
+
+    return pd.DataFrame([
+        {"Statistic": "Number of observations / rows", "Value": f"{df.shape[0]:,}"},
+        {"Statistic": "Number of columns / variables", "Value": f"{df.shape[1]:,}"},
+        {"Statistic": "Duplicated rows", "Value": f"{int(df.duplicated().sum()):,}"},
+        {"Statistic": "Total missing values", "Value": f"{missing_cells:,}"},
+        {"Statistic": "Missing values as % of all cells", "Value": f"{missing_pct}%"},
+    ])
+
+
+def missing_values_summary(df):
+    """Summarize missing values by variable."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    miss = df.isna().sum().reset_index()
+    miss.columns = ["Variable", "Missing values"]
+    miss["Missing percentage"] = (miss["Missing values"] / len(df) * 100).round(2) if len(df) else 0
+    miss = miss.sort_values(["Missing values", "Variable"], ascending=[False, True])
+    return miss
+
+
+def distribution_for_column(df, col, label=None):
+    """Frequency and percentage table for a selected categorical column."""
+    if col is None or col not in df.columns:
+        return pd.DataFrame()
+
+    series = df[col].fillna("Missing").astype(str).str.strip()
+    counts = series.value_counts(dropna=False)
+    total = counts.sum()
+
+    return pd.DataFrame({
+        "Variable": label or col,
+        "Category": counts.index,
+        "Frequency": counts.values.astype(int),
+        "Percentage": ((counts.values / total) * 100).round(2) if total else 0,
+    })
+
+
+def priority_distribution_tables(df, gender_col=None):
+    """Generate priority demographic and background distributions requested for the dashboard."""
+    requested = {
+        "Gender": ["gender", "sex", "respondent_gender", "participant_gender", "gender_identity"],
+        "Year of arrival": ["year_arrival", "year_of_arrival", "arrival_year", "year_arrived", "arrival_date", "year_arrive"],
+        "Country of origin": ["country_origin", "country_of_origin", "origin_country", "birth_country", "country_birth"],
+        "Immigration status": ["immigration_status", "immigration_stat_us", "immigration_stat", "immigration_category", "legal_status"],
+        "Marital status": ["marital_status", "marital", "relationship_status"],
+        "Highest education": ["highest_education", "highest_educatio_n", "education", "education_level", "highest_level_education"],
+        "Employment status": ["employment_status", "employment_stat_us", "employment_stat", "work_status", "current_employment_status"],
+    }
+
+    tables = {}
+    detected = {}
+
+    for label, candidates in requested.items():
+        col = gender_col if label == "Gender" and gender_col is not None else find_column_by_candidates(df, candidates)
+        detected[label] = col
+        tables[label] = distribution_for_column(df, col, label=label)
+
+    return tables, detected
+
+
+def combine_priority_distributions(priority_tables):
+    """Combine requested distribution tables into one downloadable table."""
+    frames = [table for table in priority_tables.values() if table is not None and not table.empty]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def save_priority_distribution_charts(priority_tables, output_dir):
+    """Save compact bar charts for priority demographic/background distributions."""
+    saved_paths = []
+
+    for label, table in priority_tables.items():
+        if table is None or table.empty:
+            continue
+
+        plot_df = table.sort_values("Frequency", ascending=True).tail(10)
+        fig, ax = plt.subplots(figsize=(5.2, 3.5))
+        bars = ax.barh(plot_df["Category"], plot_df["Frequency"])
+
+        for bar, freq, pct in zip(bars, plot_df["Frequency"], plot_df["Percentage"]):
+            ax.text(
+                bar.get_width(),
+                bar.get_y() + bar.get_height() / 2,
+                f" {int(freq)} ({pct:.1f}%)",
+                va="center",
+                fontsize=7,
+            )
+
+        ax.set_title(label, fontsize=10, fontweight="bold")
+        ax.set_xlabel("Frequency and percentage", fontsize=8)
+        ax.tick_params(axis="both", labelsize=7)
+        fig.tight_layout()
+
+        outpath = output_dir / f"priority_{safe_filename(label)}.png"
+        fig.savefig(outpath, dpi=240)
+        plt.close(fig)
+        saved_paths.append(outpath)
+
+    return saved_paths
+
+
+def render_priority_distribution_cards(priority_tables, detected_cols):
+    """Display priority distribution tables in a polished two-column layout."""
+    labels = list(priority_tables.keys())
+    for i in range(0, len(labels), 2):
+        cols = st.columns(2)
+        for j, label in enumerate(labels[i:i + 2]):
+            with cols[j]:
+                table = priority_tables.get(label, pd.DataFrame())
+                detected = detected_cols.get(label)
+                st.markdown(f"#### {label}")
+                if detected:
+                    st.caption(f"Detected column: `{detected}`")
+                if table is None or table.empty:
+                    st.warning(f"No matching column found for {label}.")
+                else:
+                    st.dataframe(table, use_container_width=True, hide_index=True)
 
 
 # -------------------------------------------------------------------
@@ -775,6 +946,15 @@ def create_word_report(tables, figures, outpath: Path):
 
     doc.add_heading("2. Descriptive Analysis", level=1)
 
+    doc.add_heading("2.0 Key Dataset Statistics", level=2)
+    add_docx_table(doc, tables.get("key_statistics", pd.DataFrame()))
+
+    doc.add_heading("2.0b Missing Values Summary", level=2)
+    add_docx_table(doc, tables.get("missing_values_summary", pd.DataFrame()).head(40))
+
+    doc.add_heading("2.0c Priority Demographic and Background Distributions", level=2)
+    add_docx_table(doc, tables.get("priority_distributions", pd.DataFrame()).head(80))
+
     doc.add_heading("2.1 Quantitative Variables: Averages and Distribution", level=2)
     add_docx_table(doc, tables["quantitative_summary"].head(40))
 
@@ -907,6 +1087,12 @@ gender_likert = likert_summary_by_group(df_gender, likert_cols, gender_group_col
 gender_yes_no = yes_no_summary_by_group(df_gender, yes_no_cols, gender_group_col)
 gender_categorical = categorical_frequency_by_group(df_gender, categorical_cols, gender_group_col)
 
+# Key dataset statistics and requested demographic/background distributions
+key_stats_table = key_dataset_statistics(df)
+missing_summary = missing_values_summary(df)
+priority_tables, detected_priority_columns = priority_distribution_tables(df, gender_col=gender_col)
+priority_distribution_summary = combine_priority_distributions(priority_tables)
+
 # Optional categorical disaggregation selected by client/user
 optional_group_tables = {}
 for group_col in selected_group_vars:
@@ -933,6 +1119,7 @@ save_grouped_likert_chart(gender_likert, fig_gender_likert)
 histogram_paths = save_numeric_histograms(df, numeric_cols, OUTPUT_ROOT / "figures")
 pie_paths = save_yes_no_pie_charts(df, yes_no_cols, OUTPUT_ROOT / "figures")
 categorical_chart_paths = save_categorical_bar_charts(df, categorical_cols, OUTPUT_ROOT / "figures")
+priority_chart_paths = save_priority_distribution_charts(priority_tables, OUTPUT_ROOT / "figures")
 
 # Save processed outputs
 processed_path = OUTPUT_ROOT / "processed_data" / "cleaned_emerge_dataset.csv"
@@ -945,6 +1132,9 @@ all_tables = {
     "variable_mapping": mapping,
     "descriptive_stats": desc,
     "quantitative_summary": quant_summary,
+    "key_statistics": key_stats_table,
+    "missing_values_summary": missing_summary,
+    "priority_distributions": priority_distribution_summary,
     "categorical_frequency": categorical_freq,
     "likert_agree_summary": likert_summary,
     "yes_no_summary": yes_no_results,
@@ -984,6 +1174,13 @@ create_word_report(
 # Display results
 # -------------------------------------------------------------------
 
+st.markdown("""
+<div class="hero-card">
+<h2>EMERGE+ Newcomer SEM Dashboard</h2>
+<p>Key analysis results, data readiness, demographic distribution, descriptive statistics, gender analysis, and SEM findings are presented in a reader-friendly dashboard.</p>
+</div>
+""", unsafe_allow_html=True)
+
 st.markdown("## Analysis Results")
 st.caption("Key findings are shown first so users can immediately understand the dataset before exploring detailed tabs.")
 
@@ -999,8 +1196,20 @@ with kpi3:
 with kpi4:
     st.markdown(f'<div class="metric-card"><h3>Categorical variables</h3><p>{len(categorical_cols):,}</p></div>', unsafe_allow_html=True)
 
+missing_cells_home = int(df.isna().sum().sum())
+missing_pct_home = round((missing_cells_home / (df.shape[0] * df.shape[1])) * 100, 2) if df.shape[0] * df.shape[1] else 0
+st.markdown(
+    f'<div class="stat-strip"><b>Data readiness:</b> {df.shape[0]:,} observations/rows, {df.shape[1]:,} columns, '
+    f'{int(df.duplicated().sum()):,} duplicated rows, {missing_cells_home:,} missing values ({missing_pct_home}% of all cells).</div>',
+    unsafe_allow_html=True
+)
+
 if insights:
     st.markdown('<div class="insight-box"><b>Summary insights</b><br>' + '<br>'.join([f'• {item}' for item in insights]) + '</div>', unsafe_allow_html=True)
+
+st.markdown("### Key Demographic and Background Distributions")
+st.caption("Requested distributions: gender, year of arrival, country of origin, immigration status, marital status, highest education, and employment status.")
+render_priority_distribution_cards(priority_tables, detected_priority_columns)
 
 st.markdown("### Key Quantitative Comparison by Gender")
 if gender_quant_comparison.empty:
@@ -1021,6 +1230,7 @@ st.markdown("### Dashboard Details")
 
 tabs = st.tabs([
     "Overview & Data Readiness",
+    "Key Statistics",
     "Descriptives",
     "Categorical Frequencies",
     "Gender Analysis",
@@ -1045,6 +1255,20 @@ with tabs[0]:
     st.dataframe(mapping, use_container_width=True)
 
 with tabs[1]:
+    st.subheader("Key Dataset Statistics")
+    st.caption("This section summarizes the number of observations, rows, columns, missing values, and the main demographic/background distributions requested.")
+    st.dataframe(key_stats_table, use_container_width=True, hide_index=True)
+
+    st.subheader("Missing Values by Variable")
+    st.dataframe(missing_summary, use_container_width=True, hide_index=True)
+
+    st.subheader("Requested Demographic and Background Distributions")
+    render_priority_distribution_cards(priority_tables, detected_priority_columns)
+
+    st.subheader("Priority Distribution Charts")
+    show_figures_grid(priority_chart_paths, columns_per_row=4)
+
+with tabs[2]:
     st.subheader("Quantitative Variables: Average and Descriptive Statistics")
     st.caption("This table provides averages and descriptive statistics for all quantitative variables.")
     st.dataframe(quant_summary, use_container_width=True)
@@ -1052,7 +1276,7 @@ with tabs[1]:
     st.subheader("Existing Descriptive Statistics")
     st.dataframe(desc, use_container_width=True)
 
-with tabs[2]:
+with tabs[3]:
     st.subheader("Frequency Distribution for Categorical Variables")
     st.caption("This table shows frequency and percentage distribution for categorical variables.")
     st.dataframe(categorical_freq, use_container_width=True)
@@ -1063,7 +1287,7 @@ with tabs[2]:
     st.subheader("Yes/No Response Analysis")
     st.dataframe(yes_no_results, use_container_width=True)
 
-with tabs[3]:
+with tabs[4]:
     st.subheader("Gender-Disaggregated Analysis: Men and Women Only")
 
     if gender_col is None:
@@ -1092,7 +1316,7 @@ with tabs[3]:
         st.markdown("#### Categorical Frequencies by Gender")
         st.dataframe(gender_categorical, use_container_width=True)
 
-with tabs[4]:
+with tabs[5]:
     st.subheader("Optional Disaggregated Analysis by Selected Categorical Variables")
     st.caption("Use the sidebar to choose categorical variables such as region, education, age group, country of origin, or employment status.")
 
@@ -1121,9 +1345,13 @@ with tabs[4]:
             st.markdown("#### Categorical Frequency")
             st.dataframe(optional_group_tables.get(f"{group_col}_categorical", pd.DataFrame()), use_container_width=True)
 
-with tabs[5]:
+with tabs[6]:
     st.subheader("Reader-Friendly Visual Summary")
     st.caption("Figures are shown in a compact layout with four visuals per row.")
+
+    st.markdown("#### Priority Demographic and Background Charts")
+    st.caption("Compact charts for gender, year of arrival, country of origin, immigration status, marital status, highest education, and employment status where available.")
+    show_figures_grid(priority_chart_paths, columns_per_row=4)
 
     st.markdown("#### Quantitative Histograms: Absolute Counts and Percentages")
     st.caption("Each histogram labels bars with both number of respondents and percentage share.")
@@ -1139,24 +1367,24 @@ with tabs[5]:
     main_visuals = [p for p in [fig_likert, fig_gender_likert, fig_corr, fig_paths] if p.exists()]
     show_figures_grid(main_visuals, columns_per_row=4)
 
-with tabs[6]:
+with tabs[7]:
     st.dataframe(rel, use_container_width=True)
     st.dataframe(loadings, use_container_width=True)
 
-with tabs[7]:
+with tabs[8]:
     if fig_corr.exists():
         st.image(str(fig_corr), use_container_width=True)
     st.dataframe(corr, use_container_width=True)
 
-with tabs[8]:
+with tabs[9]:
     if fig_paths.exists():
         st.image(str(fig_paths), use_container_width=True)
     st.dataframe(paths, use_container_width=True)
 
-with tabs[9]:
+with tabs[10]:
     st.dataframe(med, use_container_width=True)
 
-with tabs[10]:
+with tabs[11]:
     st.dataframe(sem_estimates, use_container_width=True)
     st.dataframe(sem_fit, use_container_width=True)
 
