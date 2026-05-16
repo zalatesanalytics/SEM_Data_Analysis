@@ -86,215 +86,6 @@ st.markdown("""
 # -------------------------------------------------------------------
 # General helper functions
 # -------------------------------------------------------------------
-# -------------------------------------------------------------------
-# CLEAN READER-FRIENDLY DISTRIBUTION TABLES
-# UPDATED VERSION
-# -------------------------------------------------------------------
-
-import pandas as pd
-import streamlit as st
-
-
-# -------------------------------------------------------------------
-# FUNCTION: CLEAN DISTRIBUTION TABLE
-# -------------------------------------------------------------------
-
-def clean_distribution_table(df, column_name):
-    """
-    Create a clean frequency distribution table
-    WITHOUT repeating the variable name column.
-
-    Example output:
-    Gender | Frequency | Percentage
-    """
-
-    # Create frequency table
-    table = (
-        df[column_name]
-        .fillna("Missing")
-        .astype(str)
-        .str.strip()
-        .value_counts(dropna=False)
-        .reset_index()
-    )
-
-    # Rename columns
-    table.columns = [
-        column_name.replace("_", " ").title(),
-        "Frequency"
-    ]
-
-    # Calculate percentages
-    total = table["Frequency"].sum()
-
-    table["Percentage"] = (
-        (table["Frequency"] / total) * 100
-    ).round(1)
-
-    # Sort descending
-    table = table.sort_values(
-        by="Frequency",
-        ascending=False
-    ).reset_index(drop=True)
-
-    return table
-
-
-# -------------------------------------------------------------------
-# DISPLAY SECTION
-# -------------------------------------------------------------------
-
-st.markdown("## Participant Distribution Overview")
-
-
-# -------------------------------------------------------------------
-# GENDER DISTRIBUTION
-# -------------------------------------------------------------------
-
-if "gender" in df.columns:
-
-    st.markdown("### Distribution of Survey Participants by Gender")
-
-    gender_table = clean_distribution_table(df, "gender")
-
-    st.dataframe(
-        gender_table,
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-# -------------------------------------------------------------------
-# YEAR ARRIVAL DISTRIBUTION
-# -------------------------------------------------------------------
-
-if "year_arrival" in df.columns:
-
-    st.markdown("### Distribution of Survey Participants by Year of Arrival")
-
-    year_arrival_table = clean_distribution_table(df, "year_arrival")
-
-    st.dataframe(
-        year_arrival_table,
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-# -------------------------------------------------------------------
-# COUNTRY OF ORIGIN DISTRIBUTION
-# -------------------------------------------------------------------
-
-if "country_origin" in df.columns:
-
-    st.markdown("### Distribution of Survey Participants by Country of Origin")
-
-    country_table = clean_distribution_table(df, "country_origin")
-
-    st.dataframe(
-        country_table,
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-# -------------------------------------------------------------------
-# IMMIGRATION STATUS DISTRIBUTION
-# -------------------------------------------------------------------
-
-if "immigration_status" in df.columns:
-
-    st.markdown("### Distribution of Survey Participants by Immigration Status")
-
-    immigration_table = clean_distribution_table(df, "immigration_status")
-
-    st.dataframe(
-        immigration_table,
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-# -------------------------------------------------------------------
-# MARITAL STATUS DISTRIBUTION
-# -------------------------------------------------------------------
-
-if "marital_status" in df.columns:
-
-    st.markdown("### Distribution of Survey Participants by Marital Status")
-
-    marital_table = clean_distribution_table(df, "marital_status")
-
-    st.dataframe(
-        marital_table,
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-# -------------------------------------------------------------------
-# HIGHEST EDUCATION DISTRIBUTION
-# -------------------------------------------------------------------
-
-if "highest_education" in df.columns:
-
-    st.markdown("### Distribution of Survey Participants by Highest Education")
-
-    education_table = clean_distribution_table(df, "highest_education")
-
-    st.dataframe(
-        education_table,
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-# -------------------------------------------------------------------
-# EMPLOYMENT STATUS DISTRIBUTION
-# -------------------------------------------------------------------
-
-if "employment_status" in df.columns:
-
-    st.markdown("### Distribution of Survey Participants by Employment Status")
-
-    employment_table = clean_distribution_table(df, "employment_status")
-
-    st.dataframe(
-        employment_table,
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-# -------------------------------------------------------------------
-# OPTIONAL: AUTOMATIC LOOP FOR OTHER VARIABLES
-# -------------------------------------------------------------------
-
-additional_distribution_vars = [
-    "province",
-    "city",
-    "language",
-    "housing_status",
-    "income_group"
-]
-
-for var in additional_distribution_vars:
-
-    if var in df.columns:
-
-        title = var.replace("_", " ").title()
-
-        st.markdown(
-            f"### Distribution of Survey Participants by {title}"
-        )
-
-        temp_table = clean_distribution_table(df, var)
-
-        st.dataframe(
-            temp_table,
-            use_container_width=True,
-            hide_index=True
-        )
 def safe_filename(name: str) -> str:
     """Convert any variable name into a safe file name."""
     return re.sub(r"[^A-Za-z0-9_]+", "_", str(name))[:80]
@@ -559,17 +350,17 @@ def missing_values_summary(df):
 
 
 def distribution_for_column(df, col, label=None):
-    """Frequency and percentage table for a selected categorical column."""
+    """Frequency and percentage table for a selected categorical column without a repeated Variable column."""
     if col is None or col not in df.columns:
         return pd.DataFrame()
 
+    display_col = pretty_label(label or col)
     series = df[col].fillna("Missing").astype(str).str.strip()
     counts = series.value_counts(dropna=False)
     total = counts.sum()
 
     return pd.DataFrame({
-        "Variable": label or col,
-        "Category": counts.index,
+        display_col: counts.index,
         "Frequency": counts.values.astype(int),
         "Percentage": ((counts.values / total) * 100).round(2) if total else 0,
     })
@@ -599,8 +390,20 @@ def priority_distribution_tables(df, gender_col=None):
 
 
 def combine_priority_distributions(priority_tables):
-    """Combine requested distribution tables into one downloadable table."""
-    frames = [table for table in priority_tables.values() if table is not None and not table.empty]
+    """Combine requested distribution tables into one downloadable table.
+
+    The dashboard displays each distribution separately without a repeated variable column.
+    This combined table adds a Distribution column only for Excel/Word export clarity.
+    """
+    frames = []
+    for label, table in priority_tables.items():
+        if table is None or table.empty:
+            continue
+        temp = table.copy()
+        first_col = [c for c in temp.columns if c not in ["Frequency", "Percentage"]][0]
+        temp = temp.rename(columns={first_col: "Category"})
+        temp.insert(0, "Distribution", label)
+        frames.append(temp)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
@@ -612,9 +415,10 @@ def save_priority_distribution_charts(priority_tables, output_dir):
         if table is None or table.empty:
             continue
 
+        category_col = [c for c in table.columns if c not in ["Frequency", "Percentage"]][0]
         plot_df = table.sort_values("Frequency", ascending=True).tail(10)
         fig, ax = plt.subplots(figsize=(5.2, 3.5))
-        bars = ax.barh(plot_df["Category"], plot_df["Frequency"])
+        bars = ax.barh(plot_df[category_col], plot_df["Frequency"])
 
         for bar, freq, pct in zip(bars, plot_df["Frequency"], plot_df["Percentage"]):
             ax.text(
@@ -654,6 +458,20 @@ def render_priority_distribution_cards(priority_tables, detected_cols):
                     st.warning(f"No matching column found for {label}.")
                 else:
                     st.dataframe(table, use_container_width=True, hide_index=True)
+
+
+def render_clean_categorical_tables(df, categorical_cols, max_tables=20):
+    """Display categorical distributions one variable at a time without a repeated Variable column."""
+    shown = 0
+    for col in categorical_cols:
+        if shown >= max_tables:
+            break
+        table = variable_distribution_table(df, col)
+        if table.empty:
+            continue
+        st.markdown(f"#### Distribution of Survey Participants by {pretty_label(col)}")
+        st.dataframe(table, use_container_width=True, hide_index=True)
+        shown += 1
 
 
 # -------------------------------------------------------------------
@@ -1518,7 +1336,7 @@ with c_top2:
     if key_distribution_tables:
         first_title, first_info = next(iter(key_distribution_tables.items()))
         st.caption(f"Distribution of survey participants by {first_title}")
-        st.dataframe(first_info["table"], use_container_width=True)
+        st.dataframe(first_info["table"], use_container_width=True, hide_index=True)
     else:
         st.info("No participant profile distribution variables detected.")
 
@@ -1574,8 +1392,8 @@ with tabs[2]:
 
 with tabs[3]:
     st.subheader("Frequency Distribution for Categorical Variables")
-    st.caption("This table shows frequency and percentage distribution for categorical variables.")
-    st.dataframe(categorical_freq, use_container_width=True)
+    st.caption("Each categorical variable is shown in its own clean table. The repeated 'Variable' column has been removed from the dashboard display.")
+    render_clean_categorical_tables(df, categorical_cols, max_tables=25)
 
     st.subheader("Likert-Scale Agree or Strongly Agree Analysis")
     st.dataframe(likert_summary, use_container_width=True)
